@@ -113,7 +113,7 @@ impl NarrowPhase {
     pub fn contact_pairs_with_unknown_gen(
         &self,
         collider: u32,
-    ) -> impl Iterator<Item = &ContactPair> {
+    ) -> impl Iterator<Item=&ContactPair> {
         self.graph_indices
             .get_unknown_gen(collider)
             .map(|id| id.contact_graph_index)
@@ -130,7 +130,7 @@ impl NarrowPhase {
     pub fn contact_pairs_with(
         &self,
         collider: ColliderHandle,
-    ) -> impl Iterator<Item = &ContactPair> {
+    ) -> impl Iterator<Item=&ContactPair> {
         self.graph_indices
             .get(collider.0)
             .map(|id| id.contact_graph_index)
@@ -146,7 +146,7 @@ impl NarrowPhase {
     pub fn intersection_pairs_with_unknown_gen(
         &self,
         collider: u32,
-    ) -> impl Iterator<Item = (ColliderHandle, ColliderHandle, bool)> + '_ {
+    ) -> impl Iterator<Item=(ColliderHandle, ColliderHandle, bool)> + '_ {
         self.graph_indices
             .get_unknown_gen(collider)
             .map(|id| id.intersection_graph_index)
@@ -167,7 +167,7 @@ impl NarrowPhase {
     pub fn intersection_pairs_with(
         &self,
         collider: ColliderHandle,
-    ) -> impl Iterator<Item = (ColliderHandle, ColliderHandle, bool)> + '_ {
+    ) -> impl Iterator<Item=(ColliderHandle, ColliderHandle, bool)> + '_ {
         self.graph_indices
             .get(collider.0)
             .map(|id| id.intersection_graph_index)
@@ -249,14 +249,14 @@ impl NarrowPhase {
     }
 
     /// All the contact pairs maintained by this narrow-phase.
-    pub fn contact_pairs(&self) -> impl Iterator<Item = &ContactPair> {
+    pub fn contact_pairs(&self) -> impl Iterator<Item=&ContactPair> {
         self.contact_graph.interactions()
     }
 
     /// All the intersection pairs maintained by this narrow-phase.
     pub fn intersection_pairs(
         &self,
-    ) -> impl Iterator<Item = (ColliderHandle, ColliderHandle, bool)> + '_ {
+    ) -> impl Iterator<Item=(ColliderHandle, ColliderHandle, bool)> + '_ {
         self.intersection_graph
             .interactions_with_endpoints()
             .map(|e| (e.0, e.1, e.2.intersecting))
@@ -552,7 +552,7 @@ impl NarrowPhase {
                     if let Some(mut intersection) = intersection {
                         if intersection.intersecting
                             && (co1.flags.active_events | co2.flags.active_events)
-                                .contains(ActiveEvents::COLLISION_EVENTS)
+                            .contains(ActiveEvents::COLLISION_EVENTS)
                         {
                             intersection.emit_stop_event(
                                 bodies,
@@ -857,7 +857,7 @@ impl NarrowPhase {
                     let link1 = multibody_joints.rigid_body_link(co_parent1.handle);
                     let link2 = multibody_joints.rigid_body_link(co_parent2.handle);
 
-                    if let (Some(link1),Some(link2)) = (link1, link2) {
+                    if let (Some(link1), Some(link2)) = (link1, link2) {
                         // If both bodies belong to the same multibody, apply some additional built-in
                         // contact filtering rules.
                         if link1.multibody == link2.multibody {
@@ -936,19 +936,19 @@ impl NarrowPhase {
                 let soft_ccd_prediction1 = rb1.map(|rb| rb.soft_ccd_prediction()).unwrap_or(0.0);
                 let soft_ccd_prediction2 = rb2.map(|rb| rb.soft_ccd_prediction()).unwrap_or(0.0);
                 let effective_prediction_distance = if soft_ccd_prediction1 > 0.0 || soft_ccd_prediction2 > 0.0 {
-                        let aabb1 = co1.compute_collision_aabb(0.0);
-                        let aabb2 = co2.compute_collision_aabb(0.0);
-                        let inv_dt = crate::utils::inv(dt);
+                    let aabb1 = co1.compute_collision_aabb(0.0);
+                    let aabb2 = co2.compute_collision_aabb(0.0);
+                    let inv_dt = crate::utils::inv(dt);
 
-                        let linvel1 = rb1.map(|rb| rb.linvel()
-                            .cap_magnitude(soft_ccd_prediction1 * inv_dt)).unwrap_or_default();
-                        let linvel2 = rb2.map(|rb| rb.linvel()
-                            .cap_magnitude(soft_ccd_prediction2 * inv_dt)).unwrap_or_default();
+                    let linvel1 = rb1.map(|rb| rb.linvel()
+                        .cap_magnitude(soft_ccd_prediction1 * inv_dt)).unwrap_or_default();
+                    let linvel2 = rb2.map(|rb| rb.linvel()
+                        .cap_magnitude(soft_ccd_prediction2 * inv_dt)).unwrap_or_default();
 
-                        if !aabb1.intersects(&aabb2) && !aabb1.intersects_moving_aabb(&aabb2, linvel2 - linvel1) {
-                            pair.clear();
-                            break 'emit_events;
-                        }
+                    if !aabb1.intersects(&aabb2) && !aabb1.intersects_moving_aabb(&aabb2, linvel2 - linvel1) {
+                        pair.clear();
+                        break 'emit_events;
+                    }
 
 
                     prediction_distance.max(
@@ -1036,33 +1036,6 @@ impl NarrowPhase {
                         }
                     }
 
-                    // Apply the user-defined contact modification.
-                    if active_hooks.contains(ActiveHooks::MODIFY_SOLVER_CONTACTS) {
-                        let mut modifiable_solver_contacts =
-                            std::mem::take(&mut manifold.data.solver_contacts);
-                        let mut modifiable_user_data = manifold.data.user_data;
-                        let mut modifiable_normal = manifold.data.normal;
-
-                        let mut context = ContactModificationContext {
-                            bodies,
-                            colliders,
-                            rigid_body1: co1.parent.map(|p| p.handle),
-                            rigid_body2: co2.parent.map(|p| p.handle),
-                            collider1: pair.collider1,
-                            collider2: pair.collider2,
-                            manifold,
-                            solver_contacts: &mut modifiable_solver_contacts,
-                            normal: &mut modifiable_normal,
-                            user_data: &mut modifiable_user_data,
-                        };
-
-                        hooks.modify_solver_contacts(&mut context);
-
-                        manifold.data.solver_contacts = modifiable_solver_contacts;
-                        manifold.data.normal = modifiable_normal;
-                        manifold.data.user_data = modifiable_user_data;
-                    }
-
                     /*
                      * TODO: When using the block solver in 3D, I’d expect this sort to help, but
                      *       it makes the domino demo worse. Needs more investigation.
@@ -1103,6 +1076,41 @@ impl NarrowPhase {
                     pair.emit_start_event(bodies, colliders, events);
                 } else {
                     pair.emit_stop_event(bodies, colliders, events);
+                }
+            }
+        });
+
+        self.contact_graph.graph.edges.iter_mut().for_each(|edge| {
+            let pair = &mut edge.weight;
+            let co1 = &colliders[pair.collider1];
+            let co2 = &colliders[pair.collider2];
+            let active_hooks = co1.flags.active_hooks | co2.flags.active_hooks;
+
+            if active_hooks.contains(ActiveHooks::MODIFY_SOLVER_CONTACTS) {
+                for manifold in &mut pair.manifolds {
+                    let mut modifiable_solver_contacts =
+                        std::mem::take(&mut manifold.data.solver_contacts);
+                    let mut modifiable_user_data = manifold.data.user_data;
+                    let mut modifiable_normal = manifold.data.normal;
+
+                    let mut context = ContactModificationContext {
+                        bodies,
+                        colliders,
+                        rigid_body1: co1.parent.map(|p| p.handle),
+                        rigid_body2: co2.parent.map(|p| p.handle),
+                        collider1: pair.collider1,
+                        collider2: pair.collider2,
+                        manifold,
+                        solver_contacts: &mut modifiable_solver_contacts,
+                        normal: &mut modifiable_normal,
+                        user_data: &mut modifiable_user_data,
+                    };
+
+                    hooks.modify_solver_contacts(&mut context);
+
+                    manifold.data.solver_contacts = modifiable_solver_contacts;
+                    manifold.data.normal = modifiable_normal;
+                    manifold.data.user_data = modifiable_user_data;
                 }
             }
         });
