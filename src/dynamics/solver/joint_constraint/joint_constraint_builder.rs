@@ -486,7 +486,7 @@ impl<N: SimdRealCopy> JointTwoBodyConstraintHelper<N> {
         ang_jac1 *= inv_dist;
         ang_jac2 *= inv_dist;
 
-        let rhs_wo_bias = (dist - limits[1]).simd_min(zero) * N::splat(params.inv_dt());
+        let rhs_wo_bias = (dist - limits[1]).simd_min(zero) + ((dist - limits[0]).simd_max(zero)) * N::splat(params.inv_dt());
 
         ang_jac1 = body1.sqrt_ii * ang_jac1;
         ang_jac2 = body2.sqrt_ii * ang_jac2;
