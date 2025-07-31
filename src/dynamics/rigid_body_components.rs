@@ -196,7 +196,9 @@ impl RigidBodyPosition {
         }
         let linear = dpos.translation.vector;
 
-        PdErrors { linear, angular }
+        let world_linear = self.position * linear;
+        let world_angular = self.position.rotation * angular;
+        PdErrors { world_linear, world_angular }
     }
 }
 
