@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use na::{point, Point3, Point4};
+use na::{Point3, Point4, point};
 
 use crate::objects::node::EntityWithGraphics;
 use rapier::dynamics::{RigidBodyHandle, RigidBodySet};
@@ -14,7 +14,6 @@ use rapier::math::{Isometry, Real, Vector};
 //use crate::objects::polyline::Polyline;
 // use crate::objects::mesh::Mesh;
 use crate::testbed::TestbedStateFlags;
-use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
 use std::collections::HashMap;
 
@@ -97,7 +96,7 @@ pub struct GraphicsManager {
 impl GraphicsManager {
     pub fn new() -> GraphicsManager {
         GraphicsManager {
-            rand: Pcg32::seed_from_u64(0),
+            rand: Pcg32::new(0, 1),
             b2sn: HashMap::new(),
             b2color: HashMap::new(),
             c2color: HashMap::new(),
@@ -128,7 +127,7 @@ impl GraphicsManager {
         self.c2color.clear();
         self.b2color.clear();
         self.b2wireframe.clear();
-        self.rand = Pcg32::seed_from_u64(0);
+        self.rand = Pcg32::new(0, 1);
     }
 
     pub fn remove_collider_nodes(
@@ -140,11 +139,11 @@ impl GraphicsManager {
         let body = body.unwrap_or(RigidBodyHandle::invalid());
         if let Some(sns) = self.b2sn.get_mut(&body) {
             sns.retain(|sn| {
-                if let Some(sn_c) = sn.collider {
-                    if sn_c == collider {
-                        commands.entity(sn.entity).despawn();
-                        return false;
-                    }
+                if let Some(sn_c) = sn.collider
+                    && sn_c == collider
+                {
+                    commands.entity(sn.entity).despawn();
+                    return false;
                 }
 
                 true
@@ -236,7 +235,8 @@ impl GraphicsManager {
     }
 
     fn gen_color(rng: &mut Pcg32) -> Point3<f32> {
-        let mut color: Point3<f32> = rng.gen();
+        use rand::Rng;
+        let mut color: Point3<f32> = rng.random();
 
         // Quantize the colors a bit to get some amount of auto-instancing from bevy.
         color.x = (color.x * 5.0).round() / 5.0;

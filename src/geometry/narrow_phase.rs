@@ -1,8 +1,8 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::data::graph::EdgeIndex;
 use crate::data::Coarena;
+use crate::data::graph::EdgeIndex;
 use crate::dynamics::{
     CoefficientCombineRule, ImpulseJointSet, IslandManager, RigidBodyDominance, RigidBodySet,
     RigidBodyType,
@@ -21,7 +21,7 @@ use crate::pipeline::{
 use crate::prelude::{CollisionEventFlags, MultibodyJointSet};
 use parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
 use parry::utils::IsometryOpt;
-use std::collections::HashMap;
+use parry::utils::hashmap::HashMap;
 use std::sync::Arc;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
@@ -47,7 +47,18 @@ enum PairRemovalMode {
     Auto,
 }
 
-/// The narrow-phase responsible for computing precise contact information between colliders.
+/// The narrow-phase collision detector that computes precise contact points between colliders.
+///
+/// After the broad-phase quickly filters out distant object pairs, the narrow-phase performs
+/// detailed geometric computations to find exact:
+/// - Contact points (where surfaces touch)
+/// - Contact normals (which direction surfaces face)
+/// - Penetration depths (how much objects overlap)
+///
+/// You typically don't interact with this directly - it's managed by [`PhysicsPipeline::step`](crate::pipeline::PhysicsPipeline::step).
+/// However, you can access it to query contact information or intersection state between specific colliders.
+///
+/// **For spatial queries** (raycasts, shape casts), use [`QueryPipeline`](crate::pipeline::QueryPipeline) instead.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone)]
 pub struct NarrowPhase {
@@ -89,7 +100,7 @@ impl NarrowPhase {
     }
 
     /// The query dispatcher used by this narrow-phase to select the right collision-detection
-    /// algorithms depending of the shape types.
+    /// algorithms depending on the shape types.
     pub fn query_dispatcher(
         &self,
     ) -> &dyn PersistentQueryDispatcher<ContactManifoldData, ContactData> {
@@ -281,8 +292,8 @@ impl NarrowPhase {
         // TODO: avoid these hash-maps.
         // They are necessary to handle the swap-remove done internally
         // by the contact/intersection graphs when a node is removed.
-        let mut prox_id_remap = HashMap::new();
-        let mut contact_id_remap = HashMap::new();
+        let mut prox_id_remap = HashMap::default();
+        let mut contact_id_remap = HashMap::default();
 
         for collider in removed_colliders {
             // NOTE: if the collider does not have any graph indices currently, there is nothing
@@ -697,14 +708,9 @@ impl NarrowPhase {
         &mut self,
         bodies: &RigidBodySet,
         colliders: &ColliderSet,
-        modified_colliders: &[ColliderHandle],
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
     ) {
-        if modified_colliders.is_empty() {
-            return;
-        }
-
         let nodes = &self.intersection_graph.graph.nodes;
         let query_dispatcher = &*self.query_dispatcher;
 
@@ -806,14 +812,9 @@ impl NarrowPhase {
         colliders: &ColliderSet,
         impulse_joints: &ImpulseJointSet,
         multibody_joints: &MultibodyJointSet,
-        modified_colliders: &[ColliderHandle],
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
     ) {
-        if modified_colliders.is_empty() {
-            return;
-        }
-
         let query_dispatcher = &*self.query_dispatcher;
 
         // TODO: don't iterate on all the edges.
@@ -1020,15 +1021,21 @@ impl NarrowPhase {
                             let effective_point = na::center(&world_pt1, &world_pt2);
 
                             let solver_contact = SolverContact {
-                                contact_id: contact_id as u8,
+                                contact_id: [contact_id as u32],
                                 point: effective_point,
                                 dist: effective_contact_dist,
                                 friction,
                                 restitution,
                                 tangent_velocity: Vector::zeros(),
-                                is_new: contact.data.impulse == 0.0,
+                                is_new: (contact.data.impulse == 0.0) as u32 as Real,
                                 warmstart_impulse: contact.data.warmstart_impulse,
                                 warmstart_tangent_impulse: contact.data.warmstart_tangent_impulse,
+                                #[cfg(feature = "dim2")]
+                                warmstart_twist_impulse: na::zero(),
+                                #[cfg(feature = "dim3")]
+                                warmstart_twist_impulse: contact.data.warmstart_twist_impulse,
+                                #[cfg(feature = "dim3")]
+                                padding: Default::default(),
                             };
 
                             manifold.data.solver_contacts.push(solver_contact);
@@ -1197,7 +1204,7 @@ mod test {
 
     use crate::prelude::{
         CCDSolver, ColliderBuilder, DefaultBroadPhase, IntegrationParameters, PhysicsPipeline,
-        QueryPipeline, RigidBodyBuilder,
+        RigidBodyBuilder,
     };
 
     use super::*;
@@ -1245,7 +1252,6 @@ mod test {
         let mut impulse_joint_set = ImpulseJointSet::new();
         let mut multibody_joint_set = MultibodyJointSet::new();
         let mut ccd_solver = CCDSolver::new();
-        let mut query_pipeline = QueryPipeline::new();
         let physics_hooks = ();
         let event_handler = ();
 
@@ -1260,7 +1266,6 @@ mod test {
             &mut impulse_joint_set,
             &mut multibody_joint_set,
             &mut ccd_solver,
-            Some(&mut query_pipeline),
             &physics_hooks,
             &event_handler,
         );
@@ -1296,7 +1301,6 @@ mod test {
             &mut impulse_joint_set,
             &mut multibody_joint_set,
             &mut ccd_solver,
-            Some(&mut query_pipeline),
             &physics_hooks,
             &event_handler,
         );
@@ -1325,7 +1329,6 @@ mod test {
                 &mut impulse_joint_set,
                 &mut multibody_joint_set,
                 &mut ccd_solver,
-                Some(&mut query_pipeline),
                 &physics_hooks,
                 &event_handler,
             );
@@ -1393,7 +1396,6 @@ mod test {
         let mut impulse_joint_set = ImpulseJointSet::new();
         let mut multibody_joint_set = MultibodyJointSet::new();
         let mut ccd_solver = CCDSolver::new();
-        let mut query_pipeline = QueryPipeline::new();
         let physics_hooks = ();
         let event_handler = ();
 
@@ -1408,7 +1410,6 @@ mod test {
             &mut impulse_joint_set,
             &mut multibody_joint_set,
             &mut ccd_solver,
-            Some(&mut query_pipeline),
             &physics_hooks,
             &event_handler,
         );
@@ -1443,7 +1444,6 @@ mod test {
             &mut impulse_joint_set,
             &mut multibody_joint_set,
             &mut ccd_solver,
-            Some(&mut query_pipeline),
             &physics_hooks,
             &event_handler,
         );
@@ -1470,7 +1470,6 @@ mod test {
             &mut impulse_joint_set,
             &mut multibody_joint_set,
             &mut ccd_solver,
-            Some(&mut query_pipeline),
             &physics_hooks,
             &event_handler,
         );

@@ -1,22 +1,23 @@
 use rapier::counters::Counters;
 use rapier::math::Real;
-use std::num::NonZeroUsize;
 
 use crate::debug_render::DebugRenderPipelineResource;
-use crate::harness::Harness;
+use crate::harness::{Harness, RapierBroadPhaseType};
 use crate::testbed::{
-    RapierSolverType, RunMode, TestbedActionFlags, TestbedState, TestbedStateFlags,
-    PHYSX_BACKEND_PATCH_FRICTION, PHYSX_BACKEND_TWO_FRICTION_DIR,
+    PHYSX_BACKEND_PATCH_FRICTION, PHYSX_BACKEND_TWO_FRICTION_DIR, RunMode, TestbedActionFlags,
+    TestbedState, TestbedStateFlags,
 };
 
 pub use bevy_egui::egui;
 
-use crate::settings::SettingValue;
 use crate::PhysicsState;
-use bevy_egui::egui::{ComboBox, Slider, Ui, Window};
+use crate::settings::SettingValue;
 use bevy_egui::EguiContexts;
-use rapier::dynamics::IntegrationParameters;
+use bevy_egui::egui::{ComboBox, Slider, Ui, Window};
 use web_time::Instant;
+
+#[cfg(feature = "dim3")]
+use rapier::dynamics::FrictionModel;
 
 pub(crate) fn update_ui(
     ui_context: &mut EguiContexts,
@@ -113,62 +114,66 @@ pub(crate) fn update_ui(
         if state.selected_backend == PHYSX_BACKEND_PATCH_FRICTION
             || state.selected_backend == PHYSX_BACKEND_TWO_FRICTION_DIR
         {
-            let mut num_iterations = integration_parameters.num_solver_iterations.get();
-            ui.add(Slider::new(&mut num_iterations, 1..=40).text("pos. iters."));
-            integration_parameters.num_solver_iterations =
-                NonZeroUsize::new(num_iterations).unwrap();
+            ui.add(
+                Slider::new(&mut integration_parameters.num_solver_iterations, 0..=10)
+                    .text("pos. iters."),
+            );
         } else {
+            // Broad-phase.
             let mut changed = false;
-            egui::ComboBox::from_label("solver type")
+            egui::ComboBox::from_label("broad-phase")
                 .width(150.0)
-                .selected_text(format!("{:?}", state.solver_type))
+                .selected_text(format!("{:?}", state.broad_phase_type))
                 .show_ui(ui, |ui| {
-                    let solver_types = [
-                        RapierSolverType::TgsSoft,
-                        RapierSolverType::TgsSoftNoWarmstart,
-                        RapierSolverType::PgsLegacy,
+                    let broad_phase_type = [
+                        RapierBroadPhaseType::BvhSubtreeOptimizer,
+                        RapierBroadPhaseType::BvhWithoutOptimization,
                     ];
-                    for sty in solver_types {
+                    for sty in broad_phase_type {
                         changed = ui
-                            .selectable_value(&mut state.solver_type, sty, format!("{sty:?}"))
+                            .selectable_value(&mut state.broad_phase_type, sty, format!("{sty:?}"))
                             .changed()
                             || changed;
                     }
                 });
 
             if changed {
-                match state.solver_type {
-                    RapierSolverType::TgsSoft => {
-                        *integration_parameters = IntegrationParameters::tgs_soft();
-                    }
-                    RapierSolverType::TgsSoftNoWarmstart => {
-                        *integration_parameters =
-                            IntegrationParameters::tgs_soft_without_warmstart();
-                    }
-                    RapierSolverType::PgsLegacy => {
-                        *integration_parameters = IntegrationParameters::pgs_legacy();
-                    }
-                }
+                harness.physics.broad_phase = state.broad_phase_type.init_broad_phase();
+                // Restart the simulation after a broad-phase changes since some
+                // broad-phase might not support hot-swapping.
+                state.action_flags.set(TestbedActionFlags::RESTART, true);
             }
 
-            let mut num_iterations = integration_parameters.num_solver_iterations.get();
-            ui.add(Slider::new(&mut num_iterations, 1..=40).text("num solver iters."));
-            integration_parameters.num_solver_iterations =
-                NonZeroUsize::new(num_iterations).unwrap();
+            // Friction model.
+            #[cfg(feature = "dim3")]
+            egui::ComboBox::from_label("friction-model")
+                .width(150.0)
+                .selected_text(format!("{:?}", integration_parameters.friction_model))
+                .show_ui(ui, |ui| {
+                    let friction_model = [FrictionModel::Simplified, FrictionModel::Coulomb];
+                    for model in friction_model {
+                        changed = ui
+                            .selectable_value(
+                                &mut integration_parameters.friction_model,
+                                model,
+                                format!("{model:?}"),
+                            )
+                            .changed()
+                            || changed;
+                    }
+                });
 
+            // Solver iterations.
+            ui.add(
+                Slider::new(&mut integration_parameters.num_solver_iterations, 0..=10)
+                    .text("num solver iters."),
+            );
             ui.add(
                 Slider::new(
                     &mut integration_parameters.num_internal_pgs_iterations,
                     1..=40,
                 )
                 .text("num internal PGS iters."),
-            );
-            ui.add(
-                Slider::new(
-                    &mut integration_parameters.num_additional_friction_iterations,
-                    0..=40,
-                )
-                .text("num additional frict. iters."),
             );
             ui.add(
                 Slider::new(
@@ -183,7 +188,7 @@ pub(crate) fn update_ui(
             );
 
             let mut substep_params = *integration_parameters;
-            substep_params.dt /= substep_params.num_solver_iterations.get() as Real;
+            substep_params.dt /= substep_params.num_solver_iterations as Real;
             let curr_erp = substep_params.contact_erp();
             let curr_cfm_factor = substep_params.contact_cfm_factor();
             ui.add(
@@ -191,17 +196,14 @@ pub(crate) fn update_ui(
                     &mut integration_parameters.contact_natural_frequency,
                     0.01..=120.0,
                 )
-                .text(format!("contacts Hz (erp = {:.3})", curr_erp)),
+                .text(format!("contacts Hz (erp = {curr_erp:.3})")),
             );
             ui.add(
                 Slider::new(
                     &mut integration_parameters.contact_damping_ratio,
                     0.01..=20.0,
                 )
-                .text(format!(
-                    "damping ratio (cfm-factor = {:.3})",
-                    curr_cfm_factor
-                )),
+                .text(format!("damping ratio (cfm-factor = {curr_cfm_factor:.3})",)),
             );
             ui.add(
                 Slider::new(
@@ -235,6 +237,13 @@ pub(crate) fn update_ui(
 
         let mut frequency = integration_parameters.inv_dt().round() as u32;
         ui.add(Slider::new(&mut frequency, 0..=240).text("frequency (Hz)"));
+        let mut gravity_y = harness.physics.gravity.y;
+        if ui
+            .add(Slider::new(&mut gravity_y, 0.0..=-200.0).text("Gravity"))
+            .changed()
+        {
+            harness.physics.gravity.y = gravity_y;
+        }
         integration_parameters.set_inv_dt(frequency as Real);
 
         let mut sleep = state.flags.contains(TestbedStateFlags::SLEEP);
@@ -371,10 +380,6 @@ fn profiling_ui(ui: &mut Ui, counters: &Counters) {
             counters.island_construction_time_ms()
         ));
         ui.label(format!(
-            "Query pipeline: {:.2}ms",
-            counters.query_pipeline_update_time_ms()
-        ));
-        ui.label(format!(
             "User changes: {:.2}ms",
             counters.stages.user_changes.time_ms()
         ));
@@ -417,13 +422,13 @@ Hashes at frame: {}
         bf.len() as f32 / 1000.0,
         format!("{:?}", hash_bf).split_at(10).0,
         nf.len() as f32 / 1000.0,
-        format!("{:?}", hash_nf).split_at(10).0,
+        format!("{hash_nf:?}").split_at(10).0,
         bs.len() as f32 / 1000.0,
-        format!("{:?}", hash_bodies).split_at(10).0,
+        format!("{hash_bodies:?}").split_at(10).0,
         cs.len() as f32 / 1000.0,
-        format!("{:?}", hash_colliders).split_at(10).0,
+        format!("{hash_colliders:?}").split_at(10).0,
         js.len() as f32 / 1000.0,
-        format!("{:?}", hash_joints).split_at(10).0,
+        format!("{hash_joints:?}").split_at(10).0,
     )
 }
 
@@ -440,7 +445,7 @@ fn example_settings_ui(ui_context: &mut EguiContexts, state: &mut TestbedState) 
             let prev_value = value.clone();
             match value {
                 SettingValue::Label(value) => {
-                    ui.label(format!("{}: {}", name, value));
+                    ui.label(format!("{name}: {value}"));
                 }
                 SettingValue::F32 { value, range } => {
                     ui.add(Slider::new(value, range.clone()).text(name));

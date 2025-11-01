@@ -4,7 +4,6 @@ use crate::data::{Arena, Coarena, Index};
 use crate::dynamics::joint::MultibodyLink;
 use crate::dynamics::{GenericJoint, Multibody, MultibodyJoint, RigidBodyHandle};
 use crate::geometry::{InteractionGraph, RigidBodyGraphIndex};
-use crate::parry::partitioning::IndexedData;
 
 /// The unique handle of an multibody_joint added to a `MultibodyJointSet`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -44,20 +43,19 @@ impl Default for MultibodyJointHandle {
     }
 }
 
-impl IndexedData for MultibodyJointHandle {
-    fn default() -> Self {
-        Self(IndexedData::default())
-    }
-    fn index(&self) -> usize {
-        self.0.index()
-    }
-}
-
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// Indexes usable to get a multibody link from a `MultibodyJointSet`.
 ///
-/// ```ignore
+/// ```
+/// # use rapier3d::prelude::*;
+/// # let mut bodies = RigidBodySet::new();
+/// # let mut multibody_joint_set = MultibodyJointSet::new();
+/// # let body1 = bodies.insert(RigidBodyBuilder::dynamic());
+/// # let body2 = bodies.insert(RigidBodyBuilder::dynamic());
+/// # let joint = RevoluteJointBuilder::new(Vector::y_axis());
+/// # multibody_joint_set.insert(body1, body2, joint, true);
+/// # let multibody_link_id = multibody_joint_set.rigid_body_link(body2).unwrap();
 /// // With:
 /// //     multibody_joint_set: MultibodyJointSet
 /// //     multibody_link_id: MultibodyLinkId
@@ -371,12 +369,12 @@ impl MultibodyJointSet {
     /// suffer form the ABA problem.
     pub fn get_unknown_gen(&self, i: u32) -> Option<(&Multibody, usize, MultibodyJointHandle)> {
         let link = self.rb2mb.get_unknown_gen(i)?;
-        let gen = self.rb2mb.get_gen(i)?;
+        let generation = self.rb2mb.get_gen(i)?;
         let multibody = self.multibodies.get(link.multibody.0)?;
         Some((
             multibody,
             link.id,
-            MultibodyJointHandle(Index::from_raw_parts(i, gen)),
+            MultibodyJointHandle(Index::from_raw_parts(i, generation)),
         ))
     }
 
@@ -427,7 +425,7 @@ impl MultibodyJointSet {
             .flat_map(move |link| self.connectivity_graph.interactions_with(link.graph_id))
             .map(|inter| {
                 // NOTE: the joint handle is always equal to the handle of the second rigid-body.
-                (inter.0, inter.1, MultibodyJointHandle(inter.1 .0))
+                (inter.0, inter.1, MultibodyJointHandle(inter.1.0))
             })
     }
 
