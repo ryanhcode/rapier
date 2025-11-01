@@ -92,7 +92,7 @@ profiling = "1.0"
 static_assertions = "1"
 
 # TODO: should be re-exported from simba
-wide = "0.7.1"
+wide = "0.8.1"
 
 [dev-dependencies]
 bincode = "1"
