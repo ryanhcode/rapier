@@ -82,6 +82,12 @@ impl PhysicsPipeline {
         colliders: &mut ColliderSet,
         modified_colliders: &mut ModifiedColliders,
     ) {
+        // TODO: we can’t just iterate on `modified_colliders` here to clear the
+        //       flags because the last substep will leave some colliders with
+        //       changes flags set after solving, but without the collider being
+        //       part of the `ModifiedColliders` set. This is a bit error-prone but
+        //       is necessary for the modified information to carry on to the
+        //       next frame’s narrow-phase for updating.
         for co in colliders.colliders.iter_mut() {
             co.1.changes = ColliderChanges::empty();
         }
@@ -163,6 +169,7 @@ impl PhysicsPipeline {
         narrow_phase.compute_contacts(
             integration_parameters.prediction_distance(),
             integration_parameters.dt,
+            islands,
             bodies,
             colliders,
             impulse_joints,
@@ -178,7 +185,7 @@ impl PhysicsPipeline {
 
     fn build_islands_and_solve_velocity_constraints(
         &mut self,
-        gravity: &Vector<Real>,
+        gravity: Vector,
         integration_parameters: &IntegrationParameters,
         islands: &mut IslandManager,
         narrow_phase: &mut NarrowPhase,
@@ -189,7 +196,8 @@ impl PhysicsPipeline {
         events: &dyn EventHandler,
     ) {
         self.counters.stages.island_construction_time.resume();
-        islands.update_active_set_with_contacts(
+        // NOTE: islands update must be done after the narrow-phase.
+        islands.update_islands(
             integration_parameters.dt,
             integration_parameters.length_unit,
             bodies,
@@ -197,19 +205,23 @@ impl PhysicsPipeline {
             narrow_phase,
             impulse_joints,
             multibody_joints,
-            integration_parameters.min_island_size,
         );
 
-        if self.manifold_indices.len() < islands.num_islands() {
-            self.manifold_indices
-                .resize(islands.num_islands(), Vec::new());
+        let num_active_islands = islands.active_islands().len();
+        if self.manifold_indices.len() < num_active_islands {
+            self.manifold_indices.resize(num_active_islands, Vec::new());
         }
 
-        if self.joint_constraint_indices.len() < islands.num_islands() {
+        if self.joint_constraint_indices.len() < num_active_islands {
             self.joint_constraint_indices
-                .resize(islands.num_islands(), Vec::new());
+                .resize(num_active_islands, Vec::new());
         }
+        self.counters.stages.island_construction_time.pause();
 
+        self.counters
+            .stages
+            .island_constraints_collection_time
+            .resume();
         let mut manifolds = Vec::new();
         narrow_phase.select_active_contacts(
             islands,
@@ -223,42 +235,45 @@ impl PhysicsPipeline {
             bodies,
             &mut self.joint_constraint_indices,
         );
-        self.counters.stages.island_construction_time.pause();
+        self.counters
+            .stages
+            .island_constraints_collection_time
+            .pause();
 
         self.counters.stages.update_time.resume();
         for handle in islands.active_bodies() {
             // TODO: should that be moved to the solver (just like we moved
             //       the multibody dynamics update) since it depends on dt?
-            let rb = bodies.index_mut_internal(*handle);
+            let rb = bodies.index_mut_internal(handle);
             rb.mprops
                 .update_world_mass_properties(rb.body_type, &rb.pos.position);
             let effective_mass = rb.mprops.effective_mass();
             rb.forces
-                .compute_effective_force_and_torque(gravity, &effective_mass);
+                .compute_effective_force_and_torque(gravity, effective_mass);
         }
         self.counters.stages.update_time.pause();
 
         self.counters.stages.solver_time.resume();
-        if self.solvers.len() < islands.num_islands() {
+        if self.solvers.len() < num_active_islands {
             self.solvers
-                .resize_with(islands.num_islands(), IslandSolver::new);
+                .resize_with(num_active_islands, IslandSolver::new);
         }
 
         #[cfg(not(feature = "parallel"))]
         {
             enable_flush_to_zero!();
 
-            for island_id in 0..islands.num_islands() {
-                self.solvers[island_id].init_and_solve(
-                    island_id,
+            for (island_awake_id, island_id) in islands.active_islands().iter().enumerate() {
+                self.solvers[island_awake_id].init_and_solve(
+                    *island_id,
                     &mut self.counters,
                     integration_parameters,
                     islands,
                     bodies,
                     &mut manifolds[..],
-                    &self.manifold_indices[island_id],
+                    &self.manifold_indices[island_awake_id],
                     impulse_joints.joints_mut(),
-                    &self.joint_constraint_indices[island_id],
+                    &self.joint_constraint_indices[island_awake_id],
                     multibody_joints,
                 )
             }
@@ -270,8 +285,7 @@ impl PhysicsPipeline {
             use rayon::prelude::*;
             use std::sync::atomic::Ordering;
 
-            let num_islands = islands.num_islands();
-            let solvers = &mut self.solvers[..num_islands];
+            let solvers = &mut self.solvers[..num_active_islands];
             let bodies = &std::sync::atomic::AtomicPtr::new(bodies as *mut _);
             let manifolds = &std::sync::atomic::AtomicPtr::new(&mut manifolds as *mut _);
             let impulse_joints =
@@ -290,7 +304,8 @@ impl PhysicsPipeline {
                 solvers
                     .par_iter_mut()
                     .enumerate()
-                    .for_each(|(island_id, solver)| {
+                    .for_each(|(island_awake_id, solver)| {
+                        let island_id = islands.active_islands()[island_awake_id];
                         let bodies: &mut RigidBodySet =
                             unsafe { &mut *bodies.load(Ordering::Relaxed) };
                         let manifolds: &mut Vec<&mut ContactManifold> =
@@ -308,9 +323,9 @@ impl PhysicsPipeline {
                             islands,
                             bodies,
                             &mut manifolds[..],
-                            &manifold_indices[island_id],
+                            &manifold_indices[island_awake_id],
                             impulse_joints,
-                            &joint_constraint_indices[island_id],
+                            &joint_constraint_indices[island_awake_id],
                             multibody_joints,
                         )
                     });
@@ -383,7 +398,7 @@ impl PhysicsPipeline {
     ) {
         // Set the rigid-bodies and kinematic bodies to their final position.
         for handle in islands.active_bodies() {
-            let rb = bodies.index_mut_internal(*handle);
+            let rb = bodies.index_mut_internal(handle);
             rb.pos.position = rb.pos.next_position;
             rb.colliders
                 .update_positions(colliders, modified_colliders, &rb.pos.position);
@@ -403,13 +418,13 @@ impl PhysicsPipeline {
         // bodies it is touching.
         for handle in islands.active_bodies() {
             // TODO PERF: only iterate on kinematic position-based bodies
-            let rb = bodies.index_mut_internal(*handle);
+            let rb = bodies.index_mut_internal(handle);
 
             match rb.body_type {
                 RigidBodyType::KinematicPositionBased => {
                     rb.vels = rb.pos.interpolate_velocity(
                         integration_parameters.inv_dt(),
-                        &rb.mprops.local_mprops.local_com,
+                        rb.mprops.local_mprops.local_com,
                     );
                 }
                 RigidBodyType::KinematicVelocityBased => {}
@@ -454,7 +469,7 @@ impl PhysicsPipeline {
     /// # let integration_parameters = IntegrationParameters::default();
     /// // In your game loop:
     /// physics_pipeline.step(
-    ///     &vector![0.0, -9.81, 0.0],  // Gravity pointing down
+    ///     Vector::new(0.0, -9.81, 0.0),  // Gravity pointing down
     ///     &integration_parameters,
     ///     &mut islands,
     ///     &mut broad_phase,
@@ -470,7 +485,7 @@ impl PhysicsPipeline {
     /// ```
     pub fn step(
         &mut self,
-        gravity: &Vector<Real>,
+        gravity: Vector,
         integration_parameters: &IntegrationParameters,
         islands: &mut IslandManager,
         broad_phase: &mut BroadPhaseBvh,
@@ -489,16 +504,16 @@ impl PhysicsPipeline {
         // Apply some of delayed wake-ups.
         self.counters.stages.user_changes.start();
         #[cfg(feature = "enhanced-determinism")]
-        let impulse_joints_iterator = impulse_joints
+        let to_wake_up_iterator = impulse_joints
             .to_wake_up
             .drain(..)
             .chain(multibody_joints.to_wake_up.drain(..));
         #[cfg(not(feature = "enhanced-determinism"))]
-        let impulse_joints_iterator = impulse_joints
+        let to_wake_up_iterator = impulse_joints
             .to_wake_up
             .drain()
             .chain(multibody_joints.to_wake_up.drain());
-        for handle in impulse_joints_iterator {
+        for handle in to_wake_up_iterator {
             islands.wake_up(bodies, handle, true);
         }
 
@@ -532,6 +547,27 @@ impl PhysicsPipeline {
                 .copied()
                 .filter(|h| colliders.get(*h).map(|c| !c.is_enabled()).unwrap_or(false)),
         );
+
+        // Join islands based on new joints.
+        #[cfg(feature = "enhanced-determinism")]
+        let to_join_iterator = impulse_joints
+            .to_join
+            .drain(..)
+            .chain(multibody_joints.to_join.drain(..));
+        #[cfg(not(feature = "enhanced-determinism"))]
+        let to_join_iterator = impulse_joints
+            .to_join
+            .drain()
+            .chain(multibody_joints.to_join.drain());
+        for (handle1, handle2) in to_join_iterator {
+            islands.interaction_started_or_stopped(
+                bodies,
+                Some(handle1),
+                Some(handle2),
+                true,
+                false,
+            );
+        }
         self.counters.stages.user_changes.pause();
 
         // TODO: do this only on user-change.
@@ -637,7 +673,9 @@ impl PhysicsPipeline {
 
             self.counters.ccd.num_substeps += 1;
 
+            self.counters.custom.resume();
             self.interpolate_kinematic_velocities(&integration_parameters, islands, bodies);
+            self.counters.custom.pause();
             self.build_islands_and_solve_velocity_constraints(
                 gravity,
                 &integration_parameters,
@@ -699,13 +737,37 @@ impl PhysicsPipeline {
             } else {
                 // If we ran the last substep, just update the broad-phase bvh instead
                 // of a full collision-detection step.
+                self.counters.stages.collision_detection_time.resume();
+                self.counters.cd.final_broad_phase_time.resume();
                 for handle in modified_colliders.iter() {
-                    let co = &colliders[*handle];
-                    let aabb = co.compute_broad_phase_aabb(&integration_parameters, bodies);
-                    broad_phase.set_aabb(&integration_parameters, *handle, aabb);
+                    let co = colliders.index_mut_internal(*handle);
+                    // NOTE: `advance_to_final_positions` might have added disabled colliders to
+                    //       `modified_colliders`. This raises the question: do we want
+                    //       rigid-body transform propagation to happen on disabled colliders if
+                    //       their parent rigid-body is enabled? For now, we are propagating as
+                    //       it feels less surprising to the user and makes handling collider
+                    //       re-enable less awkward.
+                    if co.is_enabled() {
+                        let aabb = co.compute_broad_phase_aabb(&integration_parameters, bodies);
+                        broad_phase.set_aabb(&integration_parameters, *handle, aabb);
+                    }
+
+                    // Clear the modified collider set, but keep the other collider changes flags.
+                    // This is needed so that the narrow-phase at the next timestep knows it must
+                    // not skip these colliders for its update.
+                    // TODO: this doesn’t feel very clean, but leaving the collider in the modified
+                    //       set would be expensive as this will be traversed by all the user-changes
+                    //       functions. An alternative would be to maintain a second modified set,
+                    //       one for user changes, and one for changes applied by the solver but that
+                    //       feels a bit too much. Let’s keep it simple for now and we’ll see how it
+                    //       goes after the persistent island rework.
+                    co.changes.remove(ColliderChanges::IN_MODIFIED_SET);
                 }
+
+                // Empty the modified colliders set. See comment for `co.change.remove(..)` above.
                 modified_colliders.clear();
-                // self.clear_modified_colliders(colliders, &mut modified_colliders);
+                self.counters.cd.final_broad_phase_time.pause();
+                self.counters.stages.collision_detection_time.pause();
             }
         }
 
@@ -717,7 +779,7 @@ impl PhysicsPipeline {
         //       not modified by the user in the mean time.
         self.counters.stages.update_time.resume();
         for handle in islands.active_bodies() {
-            let rb = bodies.index_mut_internal(*handle);
+            let rb = bodies.index_mut_internal(handle);
             rb.mprops
                 .update_world_mass_properties(rb.body_type, &rb.pos.position);
         }
@@ -732,13 +794,13 @@ impl PhysicsPipeline {
 
 #[cfg(test)]
 mod test {
-    use na::point;
-
     use crate::dynamics::{
         CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, RigidBodyBuilder,
         RigidBodySet,
     };
     use crate::geometry::{BroadPhaseBvh, ColliderBuilder, ColliderSet, NarrowPhase};
+    #[cfg(feature = "dim2")]
+    use crate::math::Rotation;
     use crate::math::Vector;
     use crate::pipeline::PhysicsPipeline;
     use crate::prelude::{MultibodyJointSet, RevoluteJointBuilder, RigidBodyType};
@@ -765,7 +827,7 @@ mod test {
         colliders.insert_with_parent(co, h2, &mut bodies);
 
         pipeline.step(
-            &Vector::zeros(),
+            Vector::ZERO,
             &IntegrationParameters::default(),
             &mut islands,
             &mut bf,
@@ -820,7 +882,7 @@ mod test {
         }
 
         pipeline.step(
-            &Vector::zeros(),
+            Vector::ZERO,
             &IntegrationParameters::default(),
             &mut islands,
             &mut bf,
@@ -893,7 +955,7 @@ mod test {
     #[test]
     fn collider_removal_before_step() {
         let mut pipeline = PhysicsPipeline::new();
-        let gravity = Vector::y() * -9.81;
+        let gravity = Vector::Y * -9.81;
         let integration_parameters = IntegrationParameters::default();
         let mut broad_phase = BroadPhaseBvh::new();
         let mut narrow_phase = NarrowPhase::new();
@@ -922,7 +984,7 @@ mod test {
 
         for _ in 0..10 {
             pipeline.step(
-                &gravity,
+                gravity,
                 &integration_parameters,
                 &mut islands,
                 &mut broad_phase,
@@ -957,9 +1019,9 @@ mod test {
         let h = bodies.insert(rb.clone());
 
         // Step once
-        let gravity = Vector::y() * -9.81;
+        let gravity = Vector::Y * -9.81;
         pipeline.step(
-            &gravity,
+            gravity,
             &IntegrationParameters::default(),
             &mut islands,
             &mut bf,
@@ -981,7 +1043,7 @@ mod test {
 
         // Step again
         pipeline.step(
-            &gravity,
+            gravity,
             &IntegrationParameters::default(),
             &mut islands,
             &mut bf,
@@ -1001,8 +1063,8 @@ mod test {
         // Expect gravity to be applied on second step after switching to Dynamic
         assert!(h_y < 0.0);
 
-        // Expect body to now be in active_set
-        assert!(islands.active_set.contains(&h));
+        // Expect body to now be awake (not sleeping)
+        assert!(!body.is_sleeping());
     }
 
     #[test]
@@ -1026,12 +1088,12 @@ mod test {
         // Add joint
         #[cfg(feature = "dim2")]
         let joint = RevoluteJointBuilder::new()
-            .local_anchor1(point![0.0, 1.0])
-            .local_anchor2(point![0.0, -3.0]);
+            .local_anchor1(Vector::new(0.0, 1.0))
+            .local_anchor2(Vector::new(0.0, -3.0));
         #[cfg(feature = "dim3")]
-        let joint = RevoluteJointBuilder::new(Vector::z_axis())
-            .local_anchor1(point![0.0, 1.0, 0.0])
-            .local_anchor2(point![0.0, -3.0, 0.0]);
+        let joint = RevoluteJointBuilder::new(Vector::Z)
+            .local_anchor1(Vector::new(0.0, 1.0, 0.0))
+            .local_anchor2(Vector::new(0.0, -3.0, 0.0));
         impulse_joints.insert(h, h_dynamic, joint, true);
 
         let parameters = IntegrationParameters {
@@ -1039,9 +1101,9 @@ mod test {
             ..Default::default()
         };
         // Step once
-        let gravity = Vector::y() * -9.81;
+        let gravity = Vector::Y * -9.81;
         pipeline.step(
-            &gravity,
+            gravity,
             &parameters,
             &mut islands,
             &mut bf,
@@ -1059,13 +1121,16 @@ mod test {
         assert!(translation.x.is_finite());
         assert!(translation.y.is_finite());
         #[cfg(feature = "dim2")]
-        assert!(rotation.is_finite());
+        {
+            assert!(rotation.re.is_finite());
+            assert!(rotation.im.is_finite());
+        }
         #[cfg(feature = "dim3")]
         {
             assert!(translation.z.is_finite());
-            assert!(rotation.i.is_finite());
-            assert!(rotation.j.is_finite());
-            assert!(rotation.k.is_finite());
+            assert!(rotation.x.is_finite());
+            assert!(rotation.y.is_finite());
+            assert!(rotation.z.is_finite());
             assert!(rotation.w.is_finite());
         }
     }
@@ -1073,24 +1138,21 @@ mod test {
     #[test]
     #[cfg(feature = "dim2")]
     fn test_multi_sap_disable_body() {
-        use na::vector;
         let mut rigid_body_set = RigidBodySet::new();
         let mut collider_set = ColliderSet::new();
 
         /* Create the ground. */
-        let collider = ColliderBuilder::cuboid(100.0, 0.1).build();
+        let collider = ColliderBuilder::cuboid(100.0, 0.1);
         collider_set.insert(collider);
 
         /* Create the bouncing ball. */
-        let rigid_body = RigidBodyBuilder::dynamic()
-            .translation(vector![0.0, 10.0])
-            .build();
-        let collider = ColliderBuilder::ball(0.5).restitution(0.7).build();
+        let rigid_body = RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 10.0));
+        let collider = ColliderBuilder::ball(0.5).restitution(0.7);
         let ball_body_handle = rigid_body_set.insert(rigid_body);
         collider_set.insert_with_parent(collider, ball_body_handle, &mut rigid_body_set);
 
         /* Create other structures necessary for the simulation. */
-        let gravity = vector![0.0, -9.81];
+        let gravity = Vector::new(0.0, -9.81);
         let integration_parameters = IntegrationParameters::default();
         let mut physics_pipeline = PhysicsPipeline::new();
         let mut island_manager = IslandManager::new();
@@ -1103,7 +1165,7 @@ mod test {
         let event_handler = ();
 
         physics_pipeline.step(
-            &gravity,
+            gravity,
             &integration_parameters,
             &mut island_manager,
             &mut broad_phase,
@@ -1122,14 +1184,13 @@ mod test {
             let ball_body = &mut rigid_body_set[ball_body_handle];
 
             // Also, change the translation and rotation to different values
-            ball_body.set_translation(vector![1.0, 1.0], true);
-            ball_body.set_rotation(nalgebra::UnitComplex::new(1.0), true);
-
+            ball_body.set_translation(Vector::new(1.0, 1.0), true);
+            ball_body.set_rotation(Rotation::from_angle(1.0), true);
             ball_body.set_enabled(false);
         }
 
         physics_pipeline.step(
-            &gravity,
+            gravity,
             &integration_parameters,
             &mut island_manager,
             &mut broad_phase,
@@ -1148,14 +1209,13 @@ mod test {
             let ball_body = &mut rigid_body_set[ball_body_handle];
 
             // Also, change the translation and rotation to different values
-            ball_body.set_translation(vector![0.0, 0.0], true);
-            ball_body.set_rotation(nalgebra::UnitComplex::new(0.0), true);
-
+            ball_body.set_translation(Vector::new(0.0, 0.0), true);
+            ball_body.set_rotation(Rotation::from_angle(0.0), true);
             ball_body.set_enabled(true);
         }
 
         physics_pipeline.step(
-            &gravity,
+            gravity,
             &integration_parameters,
             &mut island_manager,
             &mut broad_phase,

@@ -60,9 +60,9 @@ pub(crate) type JointGraphEdge = crate::data::graph::Edge<ImpulseJoint>;
 /// let mut joints = ImpulseJointSet::new();
 ///
 /// // Create a hinge connecting two bodies
-/// let joint = RevoluteJointBuilder::new(Vector::y_axis())
-///     .local_anchor1(point![1.0, 0.0, 0.0])
-///     .local_anchor2(point![-1.0, 0.0, 0.0])
+/// let joint = RevoluteJointBuilder::new(Vector::Y)
+///     .local_anchor1(Vector::new(1.0, 0.0, 0.0))
+///     .local_anchor2(Vector::new(-1.0, 0.0, 0.0))
 ///     .build();
 /// let handle = joints.insert(body1, body2, joint, true);
 /// ```
@@ -73,6 +73,8 @@ pub struct ImpulseJointSet {
     joint_graph: InteractionGraph<RigidBodyHandle, ImpulseJoint>,
     /// A set of rigid-body handles to wake-up during the next timestep.
     pub(crate) to_wake_up: HashSet<RigidBodyHandle>,
+    /// A set of rigid-body pairs to join in the island manager during the next timestep.
+    pub(crate) to_join: HashSet<(RigidBodyHandle, RigidBodyHandle)>,
 }
 
 impl ImpulseJointSet {
@@ -83,6 +85,7 @@ impl ImpulseJointSet {
             joint_ids: Arena::new(),
             joint_graph: InteractionGraph::new(),
             to_wake_up: HashSet::default(),
+            to_join: HashSet::default(),
         }
     }
 
@@ -114,7 +117,7 @@ impl ImpulseJointSet {
     /// # let mut joints = ImpulseJointSet::new();
     /// # let body1 = bodies.insert(RigidBodyBuilder::dynamic());
     /// # let body2 = bodies.insert(RigidBodyBuilder::dynamic());
-    /// # let joint = RevoluteJointBuilder::new(Vector::y_axis());
+    /// # let joint = RevoluteJointBuilder::new(Vector::Y);
     /// # joints.insert(body1, body2, joint, true);
     /// for (handle, joint) in joints.joints_between(body1, body2) {
     ///     println!("Found joint {:?}", handle);
@@ -145,7 +148,7 @@ impl ImpulseJointSet {
     /// # let mut joints = ImpulseJointSet::new();
     /// # let body_handle = bodies.insert(RigidBodyBuilder::dynamic());
     /// # let other_body = bodies.insert(RigidBodyBuilder::dynamic());
-    /// # let joint = RevoluteJointBuilder::new(Vector::y_axis());
+    /// # let joint = RevoluteJointBuilder::new(Vector::Y);
     /// # joints.insert(body_handle, other_body, joint, true);
     /// for (b1, b2, j_handle, joint) in joints.attached_joints(body_handle) {
     ///     println!("Body connected to {:?} via {:?}", b2, j_handle);
@@ -315,9 +318,9 @@ impl ImpulseJointSet {
     /// # let mut joints = ImpulseJointSet::new();
     /// # let body1 = bodies.insert(RigidBodyBuilder::dynamic());
     /// # let body2 = bodies.insert(RigidBodyBuilder::dynamic());
-    /// let joint = RevoluteJointBuilder::new(Vector::y_axis())
-    ///     .local_anchor1(point![1.0, 0.0, 0.0])
-    ///     .local_anchor2(point![-1.0, 0.0, 0.0])
+    /// let joint = RevoluteJointBuilder::new(Vector::Y)
+    ///     .local_anchor1(Vector::new(1.0, 0.0, 0.0))
+    ///     .local_anchor2(Vector::new(-1.0, 0.0, 0.0))
     ///     .build();
     /// let handle = joints.insert(body1, body2, joint, true);
     /// ```
@@ -335,7 +338,7 @@ impl ImpulseJointSet {
             body1,
             body2,
             data,
-            impulses: na::zero(),
+            impulses: Default::default(),
             handle: ImpulseJointHandle(handle),
         };
 
@@ -366,6 +369,8 @@ impl ImpulseJointSet {
             self.to_wake_up.insert(body2);
         }
 
+        self.to_join.insert((body1, body2));
+
         ImpulseJointHandle(handle)
     }
 
@@ -377,7 +382,7 @@ impl ImpulseJointSet {
         bodies: &RigidBodySet,
         out: &mut [Vec<JointIndex>],
     ) {
-        for out_island in &mut out[..islands.num_islands()] {
+        for out_island in &mut out[..islands.active_islands().len()] {
             out_island.clear();
         }
 
@@ -392,13 +397,17 @@ impl ImpulseJointSet {
                 && (!rb1.is_dynamic_or_kinematic() || !rb1.is_sleeping())
                 && (!rb2.is_dynamic_or_kinematic() || !rb2.is_sleeping())
             {
-                let island_index = if !rb1.is_dynamic_or_kinematic() {
-                    rb2.ids.active_island_id
+                let island_awake_index = if !rb1.is_dynamic_or_kinematic() {
+                    islands.islands[rb2.ids.active_island_id]
+                        .id_in_awake_list()
+                        .expect("Internal error: island should be awake.")
                 } else {
-                    rb1.ids.active_island_id
+                    islands.islands[rb1.ids.active_island_id]
+                        .id_in_awake_list()
+                        .expect("Internal error: island should be awake.")
                 };
 
-                out[island_index].push(i);
+                out[island_awake_index].push(i);
             }
         }
     }
@@ -417,7 +426,7 @@ impl ImpulseJointSet {
     /// # let mut joints = ImpulseJointSet::new();
     /// # let body1 = bodies.insert(RigidBodyBuilder::dynamic());
     /// # let body2 = bodies.insert(RigidBodyBuilder::dynamic());
-    /// # let joint = RevoluteJointBuilder::new(Vector::y_axis()).build();
+    /// # let joint = RevoluteJointBuilder::new(Vector::Y).build();
     /// # let joint_handle = joints.insert(body1, body2, joint, true);
     /// if let Some(joint) = joints.remove(joint_handle, true) {
     ///     println!("Removed joint between {:?} and {:?}", joint.body1, joint.body2);

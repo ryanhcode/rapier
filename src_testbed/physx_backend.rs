@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use na::{Isometry3, Matrix4, Point3, Quaternion, Translation3, Unit, UnitQuaternion, Vector3};
+use crate::ui::egui::emath::OrderedFloat;
+use glamx::{Pose3, Vec3};
+use na::{Isometry3, Matrix4, Point3, Quaternion, Unit, UnitQuaternion, Vector3};
 use physx::cooking::{
     ConvexMeshCookingResult, PxConvexMeshDesc, PxCookingParams, PxHeightFieldDesc,
     PxTriangleMeshDesc, TriangleMeshCookingResult,
@@ -27,7 +29,7 @@ trait IntoNa {
     fn into_na(self) -> Self::Output;
 }
 
-impl IntoNa for glam::Mat4 {
+impl IntoNa for glamx::Mat4 {
     type Output = Matrix4<f32>;
     fn into_na(self) -> Self::Output {
         self.to_cols_array_2d().into()
@@ -84,11 +86,35 @@ impl IntoPhysx for UnitQuaternion<f32> {
     }
 }
 
+impl IntoPhysx for glamx::Vec3 {
+    type Output = PxVec3;
+    fn into_physx(self) -> Self::Output {
+        PxVec3::new(self.x, self.y, self.z)
+    }
+}
+
+impl IntoPhysx for glamx::Quat {
+    type Output = PxQuat;
+    fn into_physx(self) -> Self::Output {
+        PxQuat::new(self.x, self.y, self.z, self.w)
+    }
+}
+
 impl IntoPhysx for Isometry3<f32> {
     type Output = PxTransform;
     fn into_physx(self) -> Self::Output {
         PxTransform::from_translation_rotation(
             &self.translation.vector.into_physx(),
+            &self.rotation.into_physx(),
+        )
+    }
+}
+
+impl IntoPhysx for glamx::Pose3 {
+    type Output = PxTransform;
+    fn into_physx(self) -> Self::Output {
+        PxTransform::from_translation_rotation(
+            &self.translation.into_physx(),
             &self.rotation.into_physx(),
         )
     }
@@ -100,30 +126,30 @@ trait IntoGlam {
 }
 
 impl IntoGlam for Vector3<f32> {
-    type Output = glam::Vec3;
+    type Output = glamx::Vec3;
     fn into_glam(self) -> Self::Output {
-        glam::vec3(self.x, self.y, self.z)
+        glamx::vec3(self.x, self.y, self.z)
     }
 }
 
 impl IntoGlam for Point3<f32> {
-    type Output = glam::Vec3;
+    type Output = glamx::Vec3;
     fn into_glam(self) -> Self::Output {
-        glam::vec3(self.x, self.y, self.z)
+        glamx::vec3(self.x, self.y, self.z)
     }
 }
 
 impl IntoGlam for Matrix4<f32> {
-    type Output = glam::Mat4;
+    type Output = glamx::Mat4;
     fn into_glam(self) -> Self::Output {
-        glam::Mat4::from_cols_array_2d(&self.into())
+        glamx::Mat4::from_cols_array_2d(&self.into())
     }
 }
 
 impl IntoGlam for Isometry3<f32> {
-    type Output = glam::Mat4;
+    type Output = glamx::Mat4;
     fn into_glam(self) -> Self::Output {
-        glam::Mat4::from_cols_array_2d(&self.to_homogeneous().into())
+        glamx::Mat4::from_cols_array_2d(&self.to_homogeneous().into())
     }
 }
 
@@ -133,7 +159,7 @@ pub static FOUNDATION: std::cell::RefCell<PxPhysicsFoundation> = std::cell::RefC
 
 pub struct PhysxWorld {
     // physics: Physics,
-    materials: Vec<Owner<PxMaterial>>,
+    // materials: Vec<Owner<PxMaterial>>,
     shapes: Vec<Owner<PxShape>>,
     scene: Option<Owner<PxScene>>,
 }
@@ -141,7 +167,7 @@ pub struct PhysxWorld {
 impl Drop for PhysxWorld {
     fn drop(&mut self) {
         let scene = self.scene.take();
-        // FIXME: we get a segfault if we don't forget the scene.
+        // FIXME: we get a segfault if we don't leak the scene.
         std::mem::forget(scene);
     }
 }
@@ -149,7 +175,7 @@ impl Drop for PhysxWorld {
 impl PhysxWorld {
     #[profiling::function]
     pub fn from_rapier(
-        gravity: Vector3<f32>,
+        gravity: Vec3,
         integration_parameters: &IntegrationParameters,
         bodies: &RigidBodySet,
         colliders: &ColliderSet,
@@ -161,7 +187,6 @@ impl PhysxWorld {
         FOUNDATION.with(|physics| {
             let mut physics = physics.borrow_mut();
             let mut shapes = Vec::new();
-            let mut materials = Vec::new();
 
             let friction_type = if use_two_friction_directions {
                 FrictionType::TwoDirectional
@@ -300,10 +325,13 @@ impl PhysxWorld {
              * Colliders
              *
              */
+            let mut materials_cache = HashMap::new();
             for (_, collider) in colliders.iter() {
-                if let Some((mut px_shape, px_material, collider_pos)) =
-                    physx_collider_from_rapier_collider(&mut *physics, &collider)
-                {
+                if let Some((mut px_shape, collider_pos)) = physx_collider_from_rapier_collider(
+                    &mut *physics,
+                    &collider,
+                    &mut materials_cache,
+                ) {
                     if let Some(parent_handle) = collider.parent() {
                         let parent_body = &bodies[parent_handle];
 
@@ -331,7 +359,6 @@ impl PhysxWorld {
                         }
 
                         shapes.push(px_shape);
-                        materials.push(px_material);
                     }
                 }
             }
@@ -396,7 +423,6 @@ impl PhysxWorld {
             Self {
                 scene: Some(scene),
                 shapes,
-                materials,
             }
         })
     }
@@ -521,14 +547,17 @@ impl PhysxWorld {
     }
 
     pub fn sync(&mut self, bodies: &mut RigidBodySet, colliders: &mut ColliderSet) {
-        let mut sync_pos = |handle: &RigidBodyHandle, pos: Isometry3<f32>| {
+        let mut sync_pos = |handle: &RigidBodyHandle, pos: Pose3| {
             let rb = &mut bodies[*handle];
             rb.set_position(pos, false);
 
             for coll_handle in rb.colliders() {
                 let collider = &mut colliders[*coll_handle];
                 collider.set_position(
-                    pos * collider.position_wrt_parent().copied().unwrap_or(na::one()),
+                    pos * collider
+                        .position_wrt_parent()
+                        .copied()
+                        .unwrap_or(Pose3::IDENTITY),
                 );
             }
         };
@@ -536,7 +565,7 @@ impl PhysxWorld {
         for actor in self.scene.as_mut().unwrap().get_dynamic_actors() {
             let handle = actor.get_user_data();
             let pos = actor.get_global_pose().into_na();
-            sync_pos(handle, pos);
+            sync_pos(handle, pos.into());
         }
 
         /*
@@ -557,8 +586,12 @@ impl PhysxWorld {
 fn physx_collider_from_rapier_collider(
     physics: &mut PxPhysicsFoundation,
     collider: &Collider,
-) -> Option<(Owner<PxShape>, Owner<PxMaterial>, Isometry3<f32>)> {
-    let mut local_pose = collider.position_wrt_parent().copied().unwrap_or(na::one());
+    materials_cache: &mut HashMap<[OrderedFloat<f32>; 2], Owner<PxMaterial>>,
+) -> Option<(Owner<PxShape>, Pose3)> {
+    let mut local_pose = collider
+        .position_wrt_parent()
+        .copied()
+        .unwrap_or(Pose3::IDENTITY);
     let cooking_params = PxCookingParams::new(physics).unwrap();
     let shape = collider.shape();
     let shape_flags = if collider.is_sensor() {
@@ -566,14 +599,22 @@ fn physx_collider_from_rapier_collider(
     } else {
         ShapeFlags::SimulationShape
     };
-    let mut material = physics
-        .create_material(
-            collider.material().friction,
-            collider.material().friction,
-            collider.material().restitution,
-            (),
-        )
-        .unwrap();
+
+    let material = materials_cache
+        .entry([
+            OrderedFloat(collider.material().friction),
+            OrderedFloat(collider.material().restitution),
+        ])
+        .or_insert_with(|| {
+            physics
+                .create_material(
+                    collider.material().friction,
+                    collider.material().friction,
+                    collider.material().restitution,
+                    (),
+                )
+                .unwrap()
+        });
     let materials = &mut [material.as_mut()][..];
 
     let shape = if let Some(cuboid) = shape.as_cuboid() {
@@ -594,20 +635,19 @@ fn physx_collider_from_rapier_collider(
             dir = -dir;
         }
 
-        let rot = UnitQuaternion::rotation_between(&Vector3::x(), &dir);
-        local_pose = local_pose
-            * Translation3::from(center.coords)
-            * rot.unwrap_or(UnitQuaternion::identity());
+        let rot = glamx::Quat::from_rotation_arc(Vec3::X, dir);
+        local_pose = local_pose.prepend_translation(center) * rot;
         let geometry = PxCapsuleGeometry::new(capsule.radius, capsule.half_height());
         physics.create_shape(&geometry, materials, true, shape_flags, ())
     } else if let Some(heightfield) = shape.as_heightfield() {
         let heights = heightfield.heights();
         let scale = heightfield.scale();
-        local_pose = local_pose * Translation3::new(-scale.x / 2.0, 0.0, -scale.z / 2.0);
+        local_pose = local_pose.prepend_translation(Vec3::new(-scale.x / 2.0, 0.0, -scale.z / 2.0));
         const Y_FACTOR: f32 = 1_000f32;
         let mut heightfield_desc;
         unsafe {
             let samples: Vec<_> = heights
+                .data()
                 .iter()
                 .map(|h| PxHeightFieldSample {
                     height: (*h * Y_FACTOR) as i16,
@@ -705,7 +745,7 @@ fn physx_collider_from_rapier_collider(
         return None;
     };
 
-    shape.map(|s| (s, material, local_pose))
+    shape.map(|s| (s, local_pose))
 }
 
 type PxPhysicsFoundation = PhysicsFoundation<DefaultAllocator, PxShape>;

@@ -1,5 +1,6 @@
+use crate::dynamics::integration_parameters::SpringCoefficients;
 use crate::dynamics::{GenericJoint, GenericJointBuilder, JointAxesMask};
-use crate::math::{Isometry, Point, Real};
+use crate::math::{Pose, Real, Vector};
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -46,49 +47,62 @@ impl FixedJoint {
 
     /// The joint’s frame, expressed in the first rigid-body’s local-space.
     #[must_use]
-    pub fn local_frame1(&self) -> &Isometry<Real> {
+    pub fn local_frame1(&self) -> &Pose {
         &self.data.local_frame1
     }
 
     /// Sets the joint’s frame, expressed in the first rigid-body’s local-space.
-    pub fn set_local_frame1(&mut self, local_frame: Isometry<Real>) -> &mut Self {
+    pub fn set_local_frame1(&mut self, local_frame: Pose) -> &mut Self {
         self.data.set_local_frame1(local_frame);
         self
     }
 
     /// The joint’s frame, expressed in the second rigid-body’s local-space.
     #[must_use]
-    pub fn local_frame2(&self) -> &Isometry<Real> {
+    pub fn local_frame2(&self) -> &Pose {
         &self.data.local_frame2
     }
 
     /// Sets joint’s frame, expressed in the second rigid-body’s local-space.
-    pub fn set_local_frame2(&mut self, local_frame: Isometry<Real>) -> &mut Self {
+    pub fn set_local_frame2(&mut self, local_frame: Pose) -> &mut Self {
         self.data.set_local_frame2(local_frame);
         self
     }
 
     /// The joint’s anchor, expressed in the local-space of the first rigid-body.
     #[must_use]
-    pub fn local_anchor1(&self) -> Point<Real> {
+    pub fn local_anchor1(&self) -> Vector {
         self.data.local_anchor1()
     }
 
     /// Sets the joint’s anchor, expressed in the local-space of the first rigid-body.
-    pub fn set_local_anchor1(&mut self, anchor1: Point<Real>) -> &mut Self {
+    pub fn set_local_anchor1(&mut self, anchor1: Vector) -> &mut Self {
         self.data.set_local_anchor1(anchor1);
         self
     }
 
     /// The joint’s anchor, expressed in the local-space of the second rigid-body.
     #[must_use]
-    pub fn local_anchor2(&self) -> Point<Real> {
+    pub fn local_anchor2(&self) -> Vector {
         self.data.local_anchor2()
     }
 
     /// Sets the joint’s anchor, expressed in the local-space of the second rigid-body.
-    pub fn set_local_anchor2(&mut self, anchor2: Point<Real>) -> &mut Self {
+    pub fn set_local_anchor2(&mut self, anchor2: Vector) -> &mut Self {
         self.data.set_local_anchor2(anchor2);
+        self
+    }
+
+    /// Gets the softness of this joint’s locked degrees of freedom.
+    #[must_use]
+    pub fn softness(&self) -> SpringCoefficients<Real> {
+        self.data.softness
+    }
+
+    /// Sets the softness of this joint’s locked degrees of freedom.
+    #[must_use]
+    pub fn set_softness(&mut self, softness: SpringCoefficients<Real>) -> &mut Self {
+        self.data.softness = softness;
         self
     }
 }
@@ -119,29 +133,36 @@ impl FixedJointBuilder {
 
     /// Sets the joint’s frame, expressed in the first rigid-body’s local-space.
     #[must_use]
-    pub fn local_frame1(mut self, local_frame: Isometry<Real>) -> Self {
+    pub fn local_frame1(mut self, local_frame: Pose) -> Self {
         self.0.set_local_frame1(local_frame);
         self
     }
 
     /// Sets joint’s frame, expressed in the second rigid-body’s local-space.
     #[must_use]
-    pub fn local_frame2(mut self, local_frame: Isometry<Real>) -> Self {
+    pub fn local_frame2(mut self, local_frame: Pose) -> Self {
         self.0.set_local_frame2(local_frame);
         self
     }
 
     /// Sets the joint’s anchor, expressed in the local-space of the first rigid-body.
     #[must_use]
-    pub fn local_anchor1(mut self, anchor1: Point<Real>) -> Self {
+    pub fn local_anchor1(mut self, anchor1: Vector) -> Self {
         self.0.set_local_anchor1(anchor1);
         self
     }
 
-    /// Sets the joint’s anchor, expressed in the local-space of the second rigid-body.
+    /// Sets the joint's anchor, expressed in the local-space of the second rigid-body.
     #[must_use]
-    pub fn local_anchor2(mut self, anchor2: Point<Real>) -> Self {
+    pub fn local_anchor2(mut self, anchor2: Vector) -> Self {
         self.0.set_local_anchor2(anchor2);
+        self
+    }
+
+    /// Sets the softness of this joint’s locked degrees of freedom.
+    #[must_use]
+    pub fn softness(mut self, softness: SpringCoefficients<Real>) -> Self {
+        self.0.data.softness = softness;
         self
     }
 

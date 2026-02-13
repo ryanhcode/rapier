@@ -6,10 +6,9 @@ use crate::dynamics::{
     MultibodyLinkId, RigidBodySet, RigidBodyType, solver::SolverVel,
 };
 use crate::geometry::{ContactManifold, ContactManifoldIndex};
-use crate::math::Real;
+use crate::math::{DVector, Real};
 use crate::prelude::RigidBodyVelocity;
-use na::DVector;
-use parry::math::{SIMD_WIDTH, Translation};
+use parry::math::SIMD_WIDTH;
 
 #[cfg(feature = "dim3")]
 use crate::dynamics::FrictionModel;
@@ -17,8 +16,8 @@ use crate::dynamics::FrictionModel;
 pub(crate) struct VelocitySolver {
     pub solver_bodies: SolverBodies,
     pub solver_vels_increment: Vec<SolverVel<Real>>,
-    pub generic_solver_vels: DVector<Real>,
-    pub generic_solver_vels_increment: DVector<Real>,
+    pub generic_solver_vels: DVector,
+    pub generic_solver_vels_increment: DVector,
     pub multibody_roots: Vec<MultibodyLinkId>,
 }
 
@@ -82,7 +81,7 @@ impl VelocitySolver {
         self.solver_bodies.clear();
 
         let aligned_solver_bodies_len =
-            islands.active_island(island_id).len().div_ceil(SIMD_WIDTH) * SIMD_WIDTH;
+            islands.island(island_id).len().div_ceil(SIMD_WIDTH) * SIMD_WIDTH;
         self.solver_bodies.resize(aligned_solver_bodies_len);
 
         self.solver_vels_increment.clear();
@@ -97,7 +96,8 @@ impl VelocitySolver {
         // Assign solver ids to multibodies, and collect the relevant roots.
         // And init solver_vels for rigid-bodies.
         let mut multibody_solver_id = 0;
-        for handle in islands.active_island(island_id) {
+
+        for (offset, handle) in islands.island(island_id).bodies().iter().enumerate() {
             if let Some(link) = multibodies.rigid_body_link(*handle).copied() {
                 let multibody = multibodies
                     .get_multibody_mut_internal(link.multibody)
@@ -110,15 +110,14 @@ impl VelocitySolver {
                 }
             } else {
                 let rb = &bodies[*handle];
-                let solver_vel_incr =
-                    &mut self.solver_vels_increment[rb.ids.active_set_offset as usize];
+                assert_eq!(offset, rb.ids.active_set_id);
+                let solver_vel_incr = &mut self.solver_vels_increment[rb.ids.active_set_id];
                 self.solver_bodies
-                    .copy_from(total_step_dt, rb.ids.active_set_offset as usize, rb);
+                    .copy_from(total_step_dt, rb.ids.active_set_id, rb);
 
                 solver_vel_incr.angular =
                     rb.mprops.effective_world_inv_inertia * rb.forces.torque * params.dt;
-                solver_vel_incr.linear =
-                    rb.forces.force.component_mul(&rb.mprops.effective_inv_mass) * params.dt;
+                solver_vel_incr.linear = rb.forces.force * rb.mprops.effective_inv_mass * params.dt;
             }
         }
 
@@ -181,7 +180,7 @@ impl VelocitySolver {
             if params.warmstart_coefficient != 0.0 {
                 // TODO PERF: we could probably figure out a way to avoid this warmstart when
                 //            step_id > 0? Maybe for that to happen `solver_vels` needs to
-                //            represent velocity changes instead of total rigid-boody velocities.
+                //            represent velocity changes instead of total rigid-body velocities.
                 //            Need to be careful wrt. multibody and joints too.
                 contact_constraints
                     .warmstart(&mut self.solver_bodies, &mut self.generic_solver_vels);
@@ -229,7 +228,11 @@ impl VelocitySolver {
             // TODO: should we add a compile flag (or a simulation parameter)
             //       to disable the rotation linearization?
             let new_vels = RigidBodyVelocity { linvel, angvel };
-            new_vels.integrate_linearized(params.dt, &mut solver_pose.pose);
+            new_vels.integrate_linearized(
+                params.dt,
+                &mut solver_pose.translation,
+                &mut solver_pose.rotation,
+            );
         }
 
         // TODO PERF: SIMD-optimized integration. Works fine, but doesn’t run faster than the scalar
@@ -290,7 +293,7 @@ impl VelocitySolver {
         bodies: &mut RigidBodySet,
         multibodies: &mut MultibodyJointSet,
     ) {
-        for handle in islands.active_island(island_id) {
+        for handle in islands.island(island_id).bodies() {
             let link = if self.multibody_roots.is_empty() {
                 None
             } else {
@@ -310,8 +313,8 @@ impl VelocitySolver {
                 }
             } else {
                 let rb = bodies.index_mut_internal(*handle);
-                let solver_vels = &self.solver_bodies.vels[rb.ids.active_set_offset as usize];
-                let solver_poses = &self.solver_bodies.poses[rb.ids.active_set_offset as usize];
+                let solver_vels = &self.solver_bodies.vels[rb.ids.active_set_id];
+                let solver_poses = &self.solver_bodies.poses[rb.ids.active_set_id];
 
                 let dangvel = solver_vels.angular;
 
@@ -323,12 +326,12 @@ impl VelocitySolver {
 
                 rb.vels = new_vels;
 
-                // NOTE: if it’s a position-based kinematic body, don’t writeback as we want
+                // NOTE: if it's a position-based kinematic body, don't writeback as we want
                 //       to preserve exactly the value given by the user (it might not be exactly
                 //       equal to the integrated position because of rounding errors).
                 if rb.body_type != RigidBodyType::KinematicPositionBased {
-                    rb.pos.next_position =
-                        solver_poses.pose * Translation::from(-rb.mprops.local_mprops.local_com);
+                    let local_com = -rb.mprops.local_mprops.local_com;
+                    rb.pos.next_position = solver_poses.pose().prepend_translation(local_com);
                 }
 
                 if rb.ccd.ccd_enabled {

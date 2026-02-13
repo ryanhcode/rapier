@@ -2,20 +2,21 @@ use crate::data::arena::Arena;
 use crate::data::{HasModifiedFlag, ModifiedObjects};
 use crate::dynamics::{IslandManager, RigidBodyHandle, RigidBodySet};
 use crate::geometry::{Collider, ColliderChanges, ColliderHandle, ColliderParent};
-use crate::math::Isometry;
+use crate::math::Pose;
 use std::ops::{Index, IndexMut};
 
-pub(crate) type ModifiedColliders = ModifiedObjects<ColliderHandle, Collider>;
+/// A set of modified colliders
+pub type ModifiedColliders = ModifiedObjects<ColliderHandle, Collider>;
 
 impl HasModifiedFlag for Collider {
     #[inline]
     fn has_modified_flag(&self) -> bool {
-        self.changes.contains(ColliderChanges::MODIFIED)
+        self.changes.contains(ColliderChanges::IN_MODIFIED_SET)
     }
 
     #[inline]
     fn set_modified_flag(&mut self) {
-        self.changes |= ColliderChanges::MODIFIED;
+        self.changes |= ColliderChanges::IN_MODIFIED_SET;
     }
 }
 
@@ -71,7 +72,16 @@ impl ColliderSet {
         }
     }
 
-    pub(crate) fn take_modified(&mut self) -> ModifiedColliders {
+    /// Fetch the set of colliders modified since the last call to
+    /// `take_modified`
+    ///
+    /// Provides a value that can be passed to the `modified_colliders` argument
+    /// of [`BroadPhaseBvh::update`](crate::geometry::BroadPhaseBvh::update).
+    ///
+    /// Should not be used if this [`ColliderSet`] will be used with a
+    /// [`PhysicsPipeline`](crate::pipeline::PhysicsPipeline), which handles
+    /// broadphase updates automatically.
+    pub fn take_modified(&mut self) -> ModifiedColliders {
         std::mem::take(&mut self.modified_colliders)
     }
 
@@ -79,7 +89,15 @@ impl ColliderSet {
         self.modified_colliders = modified;
     }
 
-    pub(crate) fn take_removed(&mut self) -> Vec<ColliderHandle> {
+    /// Fetch the set of colliders removed since the last call to `take_removed`
+    ///
+    /// Provides a value that can be passed to the `removed_colliders` argument
+    /// of [`BroadPhaseBvh::update`](crate::geometry::BroadPhaseBvh::update).
+    ///
+    /// Should not be used if this [`ColliderSet`] will be used with a
+    /// [`PhysicsPipeline`](crate::pipeline::PhysicsPipeline), which handles
+    /// broadphase updates automatically.
+    pub fn take_removed(&mut self) -> Vec<ColliderHandle> {
         std::mem::take(&mut self.removed_colliders)
     }
 
@@ -268,7 +286,7 @@ impl ColliderSet {
                     } else {
                         collider.parent = Some(ColliderParent {
                             handle: new_parent_handle,
-                            pos_wrt_parent: Isometry::identity(),
+                            pos_wrt_parent: Pose::IDENTITY,
                         })
                     };
 

@@ -4,7 +4,7 @@ pub use self::broad_phase_bvh::{BroadPhaseBvh, BvhOptimizationStrategy};
 pub use self::broad_phase_pair_event::{BroadPhasePairEvent, ColliderPair};
 pub use self::collider::{Collider, ColliderBuilder};
 pub use self::collider_components::*;
-pub use self::collider_set::ColliderSet;
+pub use self::collider_set::{ColliderSet, ModifiedColliders};
 pub use self::contact_pair::{
     ContactData, ContactManifoldData, ContactPair, IntersectionPair, SimdSolverContact,
     SolverContact, SolverFlags,
@@ -15,6 +15,7 @@ pub use self::interaction_graph::{
 pub use self::interaction_groups::{Group, InteractionGroups, InteractionTestMode};
 pub use self::mesh_converter::{MeshConverter, MeshConverterError};
 pub use self::narrow_phase::NarrowPhase;
+pub use parry::utils::Array2;
 
 pub use parry::bounding_volume::BoundingVolume;
 pub use parry::partitioning::{Bvh, BvhBuildStrategy};
@@ -163,7 +164,7 @@ pub struct ContactForceEvent {
     /// The second collider involved in the contact.
     pub collider2: ColliderHandle,
     /// The sum of all the forces between the two colliders.
-    pub total_force: Vector<Real>,
+    pub total_force: Vector,
     /// The sum of the magnitudes of each force between the two colliders.
     ///
     /// Note that this is **not** the same as the magnitude of `self.total_force`.
@@ -171,7 +172,7 @@ pub struct ContactForceEvent {
     /// the magnitude of their sum.
     pub total_force_magnitude: Real,
     /// The world-space (unit) direction of the force with strongest magnitude.
-    pub max_force_direction: Vector<Real>,
+    pub max_force_direction: Vector,
     /// The magnitude of the largest force at a contact point of this contact pair.
     pub max_force_magnitude: Real,
 }
@@ -211,7 +212,6 @@ impl ContactForceEvent {
     }
 }
 
-pub(crate) use self::collider_set::ModifiedColliders;
 pub(crate) use self::narrow_phase::ContactManifoldIndex;
 pub use parry::shape::*;
 
@@ -232,3 +232,6 @@ mod broad_phase_pair_event;
 mod collider;
 mod collider_set;
 mod mesh_converter;
+
+#[cfg(feature = "dim3")]
+mod manifold_reduction;

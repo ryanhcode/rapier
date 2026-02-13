@@ -1,6 +1,6 @@
 //! Physics pipeline structures.
 
-use crate::dynamics::{ImpulseJointSet, IntegrationParameters, MultibodyJointSet};
+use crate::dynamics::{ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet};
 use crate::geometry::{
     BroadPhaseBvh, BroadPhasePairEvent, ColliderChanges, ColliderHandle, ColliderPair,
     ModifiedColliders, NarrowPhase,
@@ -53,6 +53,7 @@ impl CollisionPipeline {
     fn detect_collisions(
         &mut self,
         prediction_distance: Real,
+        islands: &mut IslandManager,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &mut NarrowPhase,
         bodies: &mut RigidBodySet,
@@ -98,6 +99,7 @@ impl CollisionPipeline {
         narrow_phase.compute_contacts(
             prediction_distance,
             0.0,
+            islands,
             bodies,
             colliders,
             &ImpulseJointSet::new(),
@@ -126,6 +128,7 @@ impl CollisionPipeline {
     pub fn step(
         &mut self,
         prediction_distance: Real,
+        islands: &mut IslandManager,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &mut NarrowPhase,
         bodies: &mut RigidBodySet,
@@ -162,6 +165,7 @@ impl CollisionPipeline {
 
         self.detect_collisions(
             prediction_distance,
+            islands,
             broad_phase,
             narrow_phase,
             bodies,
@@ -206,6 +210,7 @@ mod tests {
         let _ = collider_set.insert(collider_b);
 
         let integration_parameters = IntegrationParameters::default();
+        let mut islands = IslandManager::new();
         let mut broad_phase = BroadPhaseBvh::new();
         let mut narrow_phase = NarrowPhase::new();
         let mut collision_pipeline = CollisionPipeline::new();
@@ -213,6 +218,7 @@ mod tests {
 
         collision_pipeline.step(
             integration_parameters.prediction_distance(),
+            &mut islands,
             &mut broad_phase,
             &mut narrow_phase,
             &mut rigid_body_set,
@@ -257,6 +263,7 @@ mod tests {
         let _ = collider_set.insert(collider_b);
 
         let integration_parameters = IntegrationParameters::default();
+        let mut islands = IslandManager::new();
         let mut broad_phase = BroadPhaseBvh::new();
         let mut narrow_phase = NarrowPhase::new();
         let mut collision_pipeline = CollisionPipeline::new();
@@ -264,6 +271,7 @@ mod tests {
 
         collision_pipeline.step(
             integration_parameters.prediction_distance(),
+            &mut islands,
             &mut broad_phase,
             &mut narrow_phase,
             &mut rigid_body_set,

@@ -1,6 +1,7 @@
+use crate::dynamics::integration_parameters::SpringCoefficients;
 use crate::dynamics::joint::{GenericJoint, GenericJointBuilder, JointAxesMask};
 use crate::dynamics::{JointAxis, MotorModel};
-use crate::math::{Point, Real};
+use crate::math::{Real, Vector};
 
 use super::JointMotor;
 
@@ -55,24 +56,24 @@ impl RopeJoint {
 
     /// The joint’s anchor, expressed in the local-space of the first rigid-body.
     #[must_use]
-    pub fn local_anchor1(&self) -> Point<Real> {
+    pub fn local_anchor1(&self) -> Vector {
         self.data.local_anchor1()
     }
 
     /// Sets the joint’s anchor, expressed in the local-space of the first rigid-body.
-    pub fn set_local_anchor1(&mut self, anchor1: Point<Real>) -> &mut Self {
+    pub fn set_local_anchor1(&mut self, anchor1: Vector) -> &mut Self {
         self.data.set_local_anchor1(anchor1);
         self
     }
 
     /// The joint’s anchor, expressed in the local-space of the second rigid-body.
     #[must_use]
-    pub fn local_anchor2(&self) -> Point<Real> {
+    pub fn local_anchor2(&self) -> Vector {
         self.data.local_anchor2()
     }
 
     /// Sets the joint’s anchor, expressed in the local-space of the second rigid-body.
-    pub fn set_local_anchor2(&mut self, anchor2: Point<Real>) -> &mut Self {
+    pub fn set_local_anchor2(&mut self, anchor2: Vector) -> &mut Self {
         self.data.set_local_anchor2(anchor2);
         self
     }
@@ -153,6 +154,19 @@ impl RopeJoint {
         self.data.set_limits(JointAxis::LinX, [0.0, max_dist]);
         self
     }
+
+    /// Gets the softness of this joint’s locked degrees of freedom.
+    #[must_use]
+    pub fn softness(&self) -> SpringCoefficients<Real> {
+        self.data.softness
+    }
+
+    /// Sets the softness of this joint’s locked degrees of freedom.
+    #[must_use]
+    pub fn set_softness(&mut self, softness: SpringCoefficients<Real>) -> &mut Self {
+        self.data.softness = softness;
+        self
+    }
 }
 
 impl From<RopeJoint> for GenericJoint {
@@ -183,14 +197,14 @@ impl RopeJointBuilder {
 
     /// Sets the joint’s anchor, expressed in the local-space of the first rigid-body.
     #[must_use]
-    pub fn local_anchor1(mut self, anchor1: Point<Real>) -> Self {
+    pub fn local_anchor1(mut self, anchor1: Vector) -> Self {
         self.0.set_local_anchor1(anchor1);
         self
     }
 
     /// Sets the joint’s anchor, expressed in the local-space of the second rigid-body.
     #[must_use]
-    pub fn local_anchor2(mut self, anchor2: Point<Real>) -> Self {
+    pub fn local_anchor2(mut self, anchor2: Vector) -> Self {
         self.0.set_local_anchor2(anchor2);
         self
     }
@@ -242,6 +256,13 @@ impl RopeJointBuilder {
     #[must_use]
     pub fn max_distance(mut self, max_dist: Real) -> Self {
         self.0.set_max_distance(max_dist);
+        self
+    }
+
+    /// Sets the softness of this joint’s locked degrees of freedom.
+    #[must_use]
+    pub fn softness(mut self, softness: SpringCoefficients<Real>) -> Self {
+        self.0.data.softness = softness;
         self
     }
 

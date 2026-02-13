@@ -1,10 +1,10 @@
 #![allow(missing_docs)] // For downcast.
 
+use crate::dynamics::integration_parameters::SpringCoefficients;
 use crate::dynamics::joint::MultibodyLink;
 use crate::dynamics::solver::{GenericJointConstraint, WritebackId};
 use crate::dynamics::{IntegrationParameters, JointMotor, Multibody};
-use crate::math::Real;
-use na::DVector;
+use crate::math::{DVector, Real};
 
 /// Initializes and generate the velocity constraints applicable to the multibody links attached
 /// to this multibody_joint.
@@ -16,15 +16,19 @@ pub fn unit_joint_limit_constraint(
     curr_pos: Real,
     dof_id: usize,
     j_id: &mut usize,
-    jacobians: &mut DVector<Real>,
+    jacobians: &mut DVector,
     constraints: &mut [GenericJointConstraint],
     insert_at: &mut usize,
+    softness: SpringCoefficients<Real>,
 ) {
     let ndofs = multibody.ndofs();
     let min_enabled = curr_pos < limits[0];
     let max_enabled = limits[1] < curr_pos;
-    let erp_inv_dt = params.joint_erp_inv_dt();
-    let cfm_coeff = params.joint_cfm_coeff();
+
+    // Compute per-joint ERP and CFM
+    let erp_inv_dt = softness.erp_inv_dt(params.dt);
+    let cfm_coeff = softness.cfm_coeff(params.dt);
+
     let rhs_bias = ((curr_pos - limits[1]).max(0.0) - (limits[0] - curr_pos).max(0.0)) * erp_inv_dt;
     let rhs_wo_bias = 0.0;
 
@@ -80,7 +84,7 @@ pub fn unit_joint_motor_constraint(
     limits: Option<[Real; 2]>,
     dof_id: usize,
     j_id: &mut usize,
-    jacobians: &mut DVector<Real>,
+    jacobians: &mut DVector,
     constraints: &mut [GenericJointConstraint],
     insert_at: &mut usize,
 ) {

@@ -11,10 +11,8 @@ use crate::dynamics::{
     RigidBodySet,
 };
 use crate::geometry::{ContactManifold, ContactManifoldIndex};
-use crate::math::SIMD_WIDTH;
-use crate::math::{MAX_MANIFOLD_POINTS, Real};
-use na::DVector;
-use parry::math::DIM;
+use crate::math::{DVector, Real, SIMD_WIDTH};
+use parry::math::SimdReal;
 
 use crate::dynamics::solver::contact_constraint::any_contact_constraint::AnyContactConstraintMut;
 #[cfg(feature = "dim3")]
@@ -31,14 +29,8 @@ pub struct ConstraintsCounts {
 }
 
 impl ConstraintsCounts {
-    pub fn from_contacts(manifold: &ContactManifold) -> Self {
-        let rest = manifold.data.solver_contacts.len() % MAX_MANIFOLD_POINTS != 0;
-        Self {
-            num_constraints: manifold.data.solver_contacts.len() / MAX_MANIFOLD_POINTS
-                + rest as usize,
-            num_jacobian_lines: manifold.data.solver_contacts.len() * DIM,
-        }
-    }
+    // NOTE: constraints count from contacts is always 1 since the max number of solver contacts
+    //       matches the max number of contact per constraint.
 
     pub fn from_joint(joint: &ImpulseJoint) -> Self {
         let joint = &joint.data;
@@ -62,20 +54,20 @@ impl ConstraintsCounts {
 }
 
 pub(crate) struct ContactConstraintsSet {
-    pub generic_jacobians: DVector<Real>,
+    pub generic_jacobians: DVector,
     pub two_body_interactions: Vec<ContactManifoldIndex>,
     pub generic_two_body_interactions: Vec<ContactManifoldIndex>,
     pub interaction_groups: InteractionGroups,
 
     pub generic_velocity_constraints: Vec<GenericContactConstraint>,
-    pub simd_velocity_coulomb_constraints: Vec<ContactWithCoulombFriction>,
+    pub simd_velocity_coulomb_constraints: Vec<ContactWithCoulombFriction<SimdReal>>,
     #[cfg(feature = "dim3")]
-    pub simd_velocity_twist_constraints: Vec<ContactWithTwistFriction>,
+    pub simd_velocity_twist_constraints: Vec<ContactWithTwistFriction<SimdReal>>,
 
     pub generic_velocity_constraints_builder: Vec<GenericContactConstraintBuilder>,
     pub simd_velocity_coulomb_constraints_builder: Vec<ContactWithCoulombFrictionBuilder>,
     #[cfg(feature = "dim3")]
-    pub simd_velocity_twist_constraints_builder: Vec<ContactWithTwistFrictionBuilder>,
+    pub simd_velocity_twist_constraints_builder: Vec<ContactWithTwistFrictionBuilder<SimdReal>>,
 }
 
 impl ContactConstraintsSet {
@@ -114,10 +106,7 @@ impl ContactConstraintsSet {
     // Returns the generic jacobians and a mutable iterator through all the constraints.
     pub fn iter_constraints_mut(
         &mut self,
-    ) -> (
-        &DVector<Real>,
-        impl Iterator<Item = AnyContactConstraintMut<'_>>,
-    ) {
+    ) -> (&DVector, impl Iterator<Item = AnyContactConstraintMut<'_>>) {
         let jac = &self.generic_jacobians;
         let a = self
             .generic_velocity_constraints
@@ -334,18 +323,8 @@ impl ContactConstraintsSet {
         solver_bodies: &SolverBodies,
         manifolds_all: &[&mut ContactManifold],
     ) {
-        let total_num_constraints = self
-            .interaction_groups
-            .simd_interactions
-            .chunks_exact(SIMD_WIDTH)
-            .map(|i| ConstraintsCounts::from_contacts(manifolds_all[i[0]]).num_constraints)
-            .sum::<usize>()
-            + self
-                .interaction_groups
-                .nongrouped_interactions
-                .iter()
-                .map(|i| ConstraintsCounts::from_contacts(manifolds_all[*i]).num_constraints)
-                .sum::<usize>();
+        let total_num_constraints = (self.interaction_groups.simd_interactions.len() / SIMD_WIDTH)
+            + self.interaction_groups.nongrouped_interactions.len();
 
         unsafe {
             reset_buffer(
@@ -358,15 +337,14 @@ impl ContactConstraintsSet {
             );
         }
 
-        let mut curr_start = 0;
+        // TODO PERF: could avoid this index using zip.
+        let mut curr_id = 0;
 
         for manifolds_i in self
             .interaction_groups
             .simd_interactions
             .chunks_exact(SIMD_WIDTH)
         {
-            let num_to_add =
-                ConstraintsCounts::from_contacts(manifolds_all[manifolds_i[0]]).num_constraints;
             let manifold_id = array![|ii| manifolds_i[ii]];
             let manifolds = array![|ii| &*manifolds_all[manifolds_i[ii]]];
 
@@ -375,16 +353,14 @@ impl ContactConstraintsSet {
                 manifolds,
                 bodies,
                 solver_bodies,
-                &mut self.simd_velocity_twist_constraints_builder[curr_start..],
-                &mut self.simd_velocity_twist_constraints[curr_start..],
+                &mut self.simd_velocity_twist_constraints_builder[curr_id],
+                &mut self.simd_velocity_twist_constraints[curr_id],
             );
 
-            curr_start += num_to_add;
+            curr_id += 1;
         }
 
         for manifolds_i in self.interaction_groups.nongrouped_interactions.iter() {
-            let num_to_add =
-                ConstraintsCounts::from_contacts(manifolds_all[*manifolds_i]).num_constraints;
             let mut manifold_id = [usize::MAX; SIMD_WIDTH];
             manifold_id[0] = *manifolds_i;
             let manifolds = [&*manifolds_all[*manifolds_i]; SIMD_WIDTH];
@@ -394,14 +370,14 @@ impl ContactConstraintsSet {
                 manifolds,
                 bodies,
                 solver_bodies,
-                &mut self.simd_velocity_twist_constraints_builder[curr_start..],
-                &mut self.simd_velocity_twist_constraints[curr_start..],
+                &mut self.simd_velocity_twist_constraints_builder[curr_id],
+                &mut self.simd_velocity_twist_constraints[curr_id],
             );
 
-            curr_start += num_to_add;
+            curr_id += 1;
         }
 
-        assert_eq!(curr_start, total_num_constraints);
+        assert_eq!(curr_id, total_num_constraints);
     }
 
     fn simd_compute_coulomb_constraints(
@@ -410,18 +386,8 @@ impl ContactConstraintsSet {
         solver_bodies: &SolverBodies,
         manifolds_all: &[&mut ContactManifold],
     ) {
-        let total_num_constraints = self
-            .interaction_groups
-            .simd_interactions
-            .chunks_exact(SIMD_WIDTH)
-            .map(|i| ConstraintsCounts::from_contacts(manifolds_all[i[0]]).num_constraints)
-            .sum::<usize>()
-            + self
-                .interaction_groups
-                .nongrouped_interactions
-                .iter()
-                .map(|i| ConstraintsCounts::from_contacts(manifolds_all[*i]).num_constraints)
-                .sum::<usize>();
+        let total_num_constraints = self.interaction_groups.simd_interactions.len() / SIMD_WIDTH
+            + self.interaction_groups.nongrouped_interactions.len();
 
         unsafe {
             reset_buffer(
@@ -434,15 +400,14 @@ impl ContactConstraintsSet {
             );
         }
 
-        let mut curr_start = 0;
+        // TODO PERF: could avoid this index using zip.
+        let mut curr_id = 0;
 
         for manifolds_i in self
             .interaction_groups
             .simd_interactions
             .chunks_exact(SIMD_WIDTH)
         {
-            let num_to_add =
-                ConstraintsCounts::from_contacts(manifolds_all[manifolds_i[0]]).num_constraints;
             let manifold_id = array![|ii| manifolds_i[ii]];
             let manifolds = array![|ii| &*manifolds_all[manifolds_i[ii]]];
 
@@ -451,16 +416,14 @@ impl ContactConstraintsSet {
                 manifolds,
                 bodies,
                 solver_bodies,
-                &mut self.simd_velocity_coulomb_constraints_builder[curr_start..],
-                &mut self.simd_velocity_coulomb_constraints[curr_start..],
+                &mut self.simd_velocity_coulomb_constraints_builder[curr_id],
+                &mut self.simd_velocity_coulomb_constraints[curr_id],
             );
 
-            curr_start += num_to_add;
+            curr_id += 1;
         }
 
         for manifolds_i in self.interaction_groups.nongrouped_interactions.iter() {
-            let num_to_add =
-                ConstraintsCounts::from_contacts(manifolds_all[*manifolds_i]).num_constraints;
             let mut manifold_id = [usize::MAX; SIMD_WIDTH];
             manifold_id[0] = *manifolds_i;
             let manifolds = [&*manifolds_all[*manifolds_i]; SIMD_WIDTH];
@@ -470,14 +433,14 @@ impl ContactConstraintsSet {
                 manifolds,
                 bodies,
                 solver_bodies,
-                &mut self.simd_velocity_coulomb_constraints_builder[curr_start..],
-                &mut self.simd_velocity_coulomb_constraints[curr_start..],
+                &mut self.simd_velocity_coulomb_constraints_builder[curr_id],
+                &mut self.simd_velocity_coulomb_constraints[curr_id],
             );
 
-            curr_start += num_to_add;
+            curr_id += 1;
         }
 
-        assert_eq!(curr_start, total_num_constraints);
+        assert_eq!(curr_id, total_num_constraints);
     }
 
     fn compute_generic_constraints(
@@ -487,11 +450,7 @@ impl ContactConstraintsSet {
         manifolds_all: &[&mut ContactManifold],
         jacobian_id: &mut usize,
     ) {
-        let total_num_constraints = self
-            .generic_two_body_interactions
-            .iter()
-            .map(|i| ConstraintsCounts::from_contacts(manifolds_all[*i]).num_constraints)
-            .sum::<usize>();
+        let total_num_constraints = self.generic_two_body_interactions.len();
 
         self.generic_velocity_constraints_builder.resize(
             total_num_constraints,
@@ -500,33 +459,33 @@ impl ContactConstraintsSet {
         self.generic_velocity_constraints
             .resize(total_num_constraints, GenericContactConstraint::invalid());
 
-        let mut curr_start = 0;
+        // TODO PERF: could avoid this index using zip.
+        let mut curr_id = 0;
 
         for manifold_i in &self.generic_two_body_interactions {
             let manifold = &manifolds_all[*manifold_i];
-            let num_to_add = ConstraintsCounts::from_contacts(manifold).num_constraints;
 
             GenericContactConstraintBuilder::generate(
                 *manifold_i,
                 manifold,
                 bodies,
                 multibody_joints,
-                &mut self.generic_velocity_constraints_builder[curr_start..],
-                &mut self.generic_velocity_constraints[curr_start..],
+                &mut self.generic_velocity_constraints_builder[curr_id],
+                &mut self.generic_velocity_constraints[curr_id],
                 &mut self.generic_jacobians,
                 jacobian_id,
             );
 
-            curr_start += num_to_add;
+            curr_id += 1;
         }
 
-        assert_eq!(curr_start, total_num_constraints);
+        assert_eq!(curr_id, total_num_constraints);
     }
 
     pub fn warmstart(
         &mut self,
         solver_bodies: &mut SolverBodies,
-        generic_solver_vels: &mut DVector<Real>,
+        generic_solver_vels: &mut DVector,
     ) {
         let (jac, constraints) = self.iter_constraints_mut();
         for mut c in constraints {
@@ -535,11 +494,7 @@ impl ContactConstraintsSet {
     }
 
     #[profiling::function]
-    pub fn solve(
-        &mut self,
-        solver_bodies: &mut SolverBodies,
-        generic_solver_vels: &mut DVector<Real>,
-    ) {
+    pub fn solve(&mut self, solver_bodies: &mut SolverBodies, generic_solver_vels: &mut DVector) {
         let (jac, constraints) = self.iter_constraints_mut();
         for mut c in constraints {
             c.solve(jac, solver_bodies, generic_solver_vels);
@@ -550,7 +505,7 @@ impl ContactConstraintsSet {
     pub fn solve_wo_bias(
         &mut self,
         solver_bodies: &mut SolverBodies,
-        generic_solver_vels: &mut DVector<Real>,
+        generic_solver_vels: &mut DVector,
     ) {
         let (jac, constraints) = self.iter_constraints_mut();
         for mut c in constraints {

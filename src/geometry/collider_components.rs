@@ -1,6 +1,6 @@
 use crate::dynamics::{CoefficientCombineRule, MassProperties, RigidBodyHandle, RigidBodyType};
 use crate::geometry::{InteractionGroups, Shape, SharedShape};
-use crate::math::{Isometry, Real};
+use crate::math::{Pose, Real};
 use crate::pipeline::{ActiveEvents, ActiveHooks};
 use std::ops::{Deref, DerefMut};
 
@@ -35,8 +35,8 @@ bitflags::bitflags! {
     #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     /// Flags describing how the collider has been modified by the user.
     pub struct ColliderChanges: u32 {
-        /// Flag indicating that any component of the collider has been modified.
-        const MODIFIED = 1 << 0;
+        /// Flag indicating that the collider handle is in the changed collider set.
+        const IN_MODIFIED_SET = 1 << 0;
         /// Flag indicating that the density or mass-properties of this collider was changed.
         const LOCAL_MASS_PROPERTIES = 1 << 1; // => RigidBody local mass-properties update.
         /// Flag indicating that the `ColliderParent` component of the collider has been modified.
@@ -173,31 +173,31 @@ pub struct ColliderParent {
     /// Handle of the rigid-body this collider is attached to.
     pub handle: RigidBodyHandle,
     /// Const position of this collider relative to its parent rigid-body.
-    pub pos_wrt_parent: Isometry<Real>,
+    pub pos_wrt_parent: Pose,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The position of a collider.
-pub struct ColliderPosition(pub Isometry<Real>);
+pub struct ColliderPosition(pub Pose);
 
-impl AsRef<Isometry<Real>> for ColliderPosition {
+impl AsRef<Pose> for ColliderPosition {
     #[inline]
-    fn as_ref(&self) -> &Isometry<Real> {
+    fn as_ref(&self) -> &Pose {
         &self.0
     }
 }
 
-impl AsMut<Isometry<Real>> for ColliderPosition {
-    fn as_mut(&mut self) -> &mut Isometry<Real> {
+impl AsMut<Pose> for ColliderPosition {
+    fn as_mut(&mut self) -> &mut Pose {
         &mut self.0
     }
 }
 
 impl Deref for ColliderPosition {
-    type Target = Isometry<Real>;
+    type Target = Pose;
     #[inline]
-    fn deref(&self) -> &Isometry<Real> {
+    fn deref(&self) -> &Pose {
         &self.0
     }
 }
@@ -218,13 +218,13 @@ impl ColliderPosition {
     /// The identity position.
     #[must_use]
     pub fn identity() -> Self {
-        ColliderPosition(Isometry::identity())
+        ColliderPosition(Pose::IDENTITY)
     }
 }
 
 impl<T> From<T> for ColliderPosition
 where
-    Isometry<Real>: From<T>,
+    Pose: From<T>,
 {
     fn from(position: T) -> Self {
         Self(position.into())

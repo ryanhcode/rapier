@@ -3,30 +3,32 @@ use crate::dynamics::integration_parameters::BLOCK_SOLVER_ENABLED;
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::{IntegrationParameters, MultibodyJointSet, RigidBodySet};
 use crate::geometry::{ContactManifold, ContactManifoldIndex, SimdSolverContact};
-use crate::math::{DIM, MAX_MANIFOLD_POINTS, Point, Real, SIMD_WIDTH, SimdReal, Vector};
+use crate::math::{DIM, MAX_MANIFOLD_POINTS, Real, SIMD_WIDTH, SimdReal};
+#[cfg(not(feature = "simd-is-enabled"))]
+use crate::utils::ComponentMul;
 #[cfg(feature = "dim2")]
-use crate::utils::SimdBasis;
-use crate::utils::{self, SimdAngularInertia, SimdCross, SimdDot, SimdRealCopy};
+use crate::utils::OrthonormalBasis;
+use crate::utils::{self, AngularInertiaOps, CrossProduct, DotProduct, ScalarType};
 use num::Zero;
 use parry::utils::SdpMatrix2;
 use simba::simd::{SimdPartialOrd, SimdValue};
 
 #[derive(Copy, Clone, Debug)]
-pub struct CoulombContactPointInfos<N: SimdRealCopy> {
-    pub tangent_vel: Vector<N>, // PERF: could be one float less, be shared by both contact point infos?
+pub struct CoulombContactPointInfos<N: ScalarType> {
+    pub tangent_vel: N::Vector, // PERF: could be one float less, be shared by both contact point infos?
     pub normal_vel: N,
-    pub local_p1: Point<N>,
-    pub local_p2: Point<N>,
+    pub local_p1: N::Vector,
+    pub local_p2: N::Vector,
     pub dist: N,
 }
 
-impl<N: SimdRealCopy> Default for CoulombContactPointInfos<N> {
+impl<N: ScalarType> Default for CoulombContactPointInfos<N> {
     fn default() -> Self {
         Self {
-            tangent_vel: Vector::zeros(),
+            tangent_vel: Default::default(),
             normal_vel: N::zero(),
-            local_p1: Point::origin(),
-            local_p2: Point::origin(),
+            local_p1: Default::default(),
+            local_p2: Default::default(),
             dist: N::zero(),
         }
     }
@@ -43,8 +45,8 @@ impl ContactWithCoulombFrictionBuilder {
         manifolds: [&ContactManifold; SIMD_WIDTH],
         bodies: &RigidBodySet,
         solver_bodies: &SolverBodies,
-        out_builders: &mut [ContactWithCoulombFrictionBuilder],
-        out_constraints: &mut [ContactWithCoulombFriction],
+        out_builder: &mut ContactWithCoulombFrictionBuilder,
+        out_constraint: &mut ContactWithCoulombFriction<SimdReal>,
     ) {
         // TODO: could we avoid having to fetch the ids here? It’s the only thing we
         //       read from the original rigid-bodies.
@@ -52,7 +54,7 @@ impl ContactWithCoulombFrictionBuilder {
             && manifold_id[ii] != usize::MAX
         {
             let handle = manifolds[ii].data.rigid_body1.unwrap(); // Can unwrap thanks to the dominance check.
-            bodies[handle].ids.active_set_offset
+            bodies[handle].ids.active_set_id as u32
         } else {
             u32::MAX
         }];
@@ -60,7 +62,7 @@ impl ContactWithCoulombFrictionBuilder {
             && manifold_id[ii] != usize::MAX
         {
             let handle = manifolds[ii].data.rigid_body2.unwrap(); // Can unwrap thanks to the dominance check.
-            bodies[handle].ids.active_set_offset
+            bodies[handle].ids.active_set_id as u32
         } else {
             u32::MAX
         }];
@@ -70,178 +72,178 @@ impl ContactWithCoulombFrictionBuilder {
         let vels2 = solver_bodies.gather_vels(ids2);
         let poses2 = solver_bodies.gather_poses(ids2);
 
-        let world_com1 = Point::from(poses1.pose.translation.vector);
-        let world_com2 = Point::from(poses2.pose.translation.vector);
+        let world_com1 = poses1.translation;
+        let world_com2 = poses2.translation;
 
         // TODO PERF: implement SIMD gather
-        let force_dir1 = -Vector::<SimdReal>::from(gather![|ii| manifolds[ii].data.normal]);
+        #[cfg(feature = "simd-is-enabled")]
+        let force_dir1 =
+            -<SimdReal as ScalarType>::Vector::from(gather![|ii| manifolds[ii].data.normal.into()]);
+        #[cfg(not(feature = "simd-is-enabled"))]
+        let force_dir1 = -manifolds[0].data.normal;
+
         let num_active_contacts = manifolds[0].data.num_active_contacts();
 
         #[cfg(feature = "dim2")]
         let tangents1 = force_dir1.orthonormal_basis();
         #[cfg(feature = "dim3")]
-        let tangents1 =
-            super::compute_tangent_contact_directions(&force_dir1, &vels1.linear, &vels2.linear);
+        let tangents1 = super::compute_tangent_contact_directions::<SimdReal>(
+            &force_dir1,
+            &vels1.linear,
+            &vels2.linear,
+        );
 
-        for l in (0..num_active_contacts).step_by(MAX_MANIFOLD_POINTS) {
-            let manifold_points =
-                array![|ii| &manifolds[ii].data.solver_contacts[l..num_active_contacts]];
-            let num_points = manifold_points[0].len().min(MAX_MANIFOLD_POINTS);
+        let manifold_points =
+            array![|ii| &manifolds[ii].data.solver_contacts[..num_active_contacts]];
+        let num_points = manifold_points[0].len().min(MAX_MANIFOLD_POINTS);
 
-            let constraint = &mut out_constraints[l / MAX_MANIFOLD_POINTS];
-            let builder = &mut out_builders[l / MAX_MANIFOLD_POINTS];
+        out_constraint.dir1 = force_dir1;
+        out_constraint.im1 = poses1.im;
+        out_constraint.im2 = poses2.im;
+        out_constraint.solver_vel1 = ids1;
+        out_constraint.solver_vel2 = ids2;
+        out_constraint.manifold_id = manifold_id;
+        out_constraint.num_contacts = num_points as u8;
+        #[cfg(feature = "dim3")]
+        {
+            out_constraint.tangent1 = tangents1[0];
+        }
 
-            constraint.dir1 = force_dir1;
-            constraint.im1 = poses1.im;
-            constraint.im2 = poses2.im;
-            constraint.solver_vel1 = ids1;
-            constraint.solver_vel2 = ids2;
-            constraint.manifold_id = manifold_id;
-            constraint.num_contacts = num_points as u8;
+        for k in 0..num_points {
+            // SAFETY: we already know that the `manifold_points` has `num_points` elements
+            //         so `k` isn’t out of bounds.
+            let solver_contact =
+                unsafe { SimdSolverContact::gather_unchecked(&manifold_points, k) };
+
+            let is_bouncy = solver_contact.is_bouncy();
+
+            let dp1 = solver_contact.point - world_com1;
+            let dp2 = solver_contact.point - world_com2;
+
+            let vel1 = vels1.linear + vels1.angular.gcross(dp1);
+            let vel2 = vels2.linear + vels2.angular.gcross(dp2);
+
+            out_constraint.limit = solver_contact.friction;
+            out_constraint.manifold_contact_id[k] = solver_contact.contact_id.map(|id| id as u8);
+
+            // Normal part.
+            let normal_rhs_wo_bias;
+            {
+                let torque_dir1 = dp1.gcross(force_dir1);
+                let torque_dir2 = dp2.gcross(-force_dir1);
+                let ii_torque_dir1 = poses1.ii.transform_vector(torque_dir1);
+                let ii_torque_dir2 = poses2.ii.transform_vector(torque_dir2);
+
+                let imsum = poses1.im + poses2.im;
+                let projected_mass = utils::simd_inv(
+                    force_dir1.gdot(imsum.component_mul(&force_dir1))
+                        + ii_torque_dir1.gdot(torque_dir1)
+                        + ii_torque_dir2.gdot(torque_dir2),
+                );
+
+                let projected_velocity = (vel1 - vel2).gdot(force_dir1);
+                normal_rhs_wo_bias = is_bouncy * solver_contact.restitution * projected_velocity;
+
+                out_constraint.normal_part[k].torque_dir1 = torque_dir1;
+                out_constraint.normal_part[k].torque_dir2 = torque_dir2;
+                out_constraint.normal_part[k].ii_torque_dir1 = ii_torque_dir1;
+                out_constraint.normal_part[k].ii_torque_dir2 = ii_torque_dir2;
+                out_constraint.normal_part[k].impulse = solver_contact.warmstart_impulse;
+                out_constraint.normal_part[k].r = projected_mass;
+            }
+
+            // tangent parts.
+            out_constraint.tangent_part[k].impulse = solver_contact.warmstart_tangent_impulse;
+
+            for j in 0..DIM - 1 {
+                let torque_dir1 = dp1.gcross(tangents1[j]);
+                let torque_dir2 = dp2.gcross(-tangents1[j]);
+                let ii_torque_dir1 = poses1.ii.transform_vector(torque_dir1);
+                let ii_torque_dir2 = poses2.ii.transform_vector(torque_dir2);
+
+                let imsum = poses1.im + poses2.im;
+
+                let r = tangents1[j].gdot(imsum.component_mul(&tangents1[j]))
+                    + ii_torque_dir1.gdot(torque_dir1)
+                    + ii_torque_dir2.gdot(torque_dir2);
+                let rhs_wo_bias = solver_contact.tangent_velocity.gdot(tangents1[j]);
+
+                out_constraint.tangent_part[k].torque_dir1[j] = torque_dir1;
+                out_constraint.tangent_part[k].torque_dir2[j] = torque_dir2;
+                out_constraint.tangent_part[k].ii_torque_dir1[j] = ii_torque_dir1;
+                out_constraint.tangent_part[k].ii_torque_dir2[j] = ii_torque_dir2;
+                out_constraint.tangent_part[k].rhs_wo_bias[j] = rhs_wo_bias;
+                out_constraint.tangent_part[k].rhs[j] = rhs_wo_bias;
+                out_constraint.tangent_part[k].r[j] = if cfg!(feature = "dim2") {
+                    utils::simd_inv(r)
+                } else {
+                    r
+                };
+            }
+
             #[cfg(feature = "dim3")]
             {
-                constraint.tangent1 = tangents1[0];
+                // TODO PERF: we already applied the inverse inertia to the torque
+                //            dire before. Could we reuse the value instead of retransforming?
+                out_constraint.tangent_part[k].r[2] = SimdReal::splat(2.0)
+                    * (out_constraint.tangent_part[k].ii_torque_dir1[0]
+                        .gdot(out_constraint.tangent_part[k].torque_dir1[1])
+                        + out_constraint.tangent_part[k].ii_torque_dir2[0]
+                            .gdot(out_constraint.tangent_part[k].torque_dir2[1]));
             }
 
-            for k in 0..num_points {
-                // SAFETY: we already know that the `manifold_points` has `num_points` elements
-                //         so `k` isn’t out of bounds.
-                let solver_contact =
-                    unsafe { SimdSolverContact::gather_unchecked(&manifold_points, k) };
+            // Builder.
+            out_builder.infos[k].local_p1 = poses1.inverse_transform_point(solver_contact.point);
+            out_builder.infos[k].local_p2 = poses2.inverse_transform_point(solver_contact.point);
+            out_builder.infos[k].tangent_vel = solver_contact.tangent_velocity;
+            out_builder.infos[k].dist = solver_contact.dist;
+            out_builder.infos[k].normal_vel = normal_rhs_wo_bias;
+        }
 
-                let is_bouncy = solver_contact.is_bouncy();
+        if BLOCK_SOLVER_ENABLED {
+            // Coupling between consecutive pairs.
+            for k in 0..num_points / 2 {
+                let k0 = k * 2;
+                let k1 = k * 2 + 1;
 
-                let dp1 = solver_contact.point - world_com1;
-                let dp2 = solver_contact.point - world_com2;
+                let imsum = poses1.im + poses2.im;
+                let r0 = out_constraint.normal_part[k0].r;
+                let r1 = out_constraint.normal_part[k1].r;
 
-                let vel1 = vels1.linear + vels1.angular.gcross(dp1);
-                let vel2 = vels2.linear + vels2.angular.gcross(dp2);
+                let mut r_mat = SdpMatrix2::zero();
 
-                constraint.limit = solver_contact.friction;
-                constraint.manifold_contact_id[k] = solver_contact.contact_id.map(|id| id as u8);
+                // TODO PERF: we already applied the inverse inertia to the torque
+                //            dire before. Could we reuse the value instead of retransforming?
+                r_mat.m12 = force_dir1.gdot(imsum.component_mul(&force_dir1))
+                    + out_constraint.normal_part[k0]
+                        .ii_torque_dir1
+                        .gdot(out_constraint.normal_part[k1].torque_dir1)
+                    + out_constraint.normal_part[k0]
+                        .ii_torque_dir2
+                        .gdot(out_constraint.normal_part[k1].torque_dir2);
+                r_mat.m11 = utils::simd_inv(r0);
+                r_mat.m22 = utils::simd_inv(r1);
 
-                // Normal part.
-                let normal_rhs_wo_bias;
-                {
-                    let torque_dir1 = dp1.gcross(force_dir1);
-                    let torque_dir2 = dp2.gcross(-force_dir1);
-                    let ii_torque_dir1 = poses1.ii.transform_vector(torque_dir1);
-                    let ii_torque_dir2 = poses2.ii.transform_vector(torque_dir2);
-
-                    let imsum = poses1.im + poses2.im;
-                    let projected_mass = utils::simd_inv(
-                        force_dir1.dot(&imsum.component_mul(&force_dir1))
-                            + ii_torque_dir1.gdot(torque_dir1)
-                            + ii_torque_dir2.gdot(torque_dir2),
-                    );
-
-                    let projected_velocity = (vel1 - vel2).dot(&force_dir1);
-                    normal_rhs_wo_bias =
-                        is_bouncy * solver_contact.restitution * projected_velocity;
-
-                    constraint.normal_part[k].torque_dir1 = torque_dir1;
-                    constraint.normal_part[k].torque_dir2 = torque_dir2;
-                    constraint.normal_part[k].ii_torque_dir1 = ii_torque_dir1;
-                    constraint.normal_part[k].ii_torque_dir2 = ii_torque_dir2;
-                    constraint.normal_part[k].impulse = solver_contact.warmstart_impulse;
-                    constraint.normal_part[k].r = projected_mass;
-                }
-
-                // tangent parts.
-                constraint.tangent_part[k].impulse = solver_contact.warmstart_tangent_impulse;
-
-                for j in 0..DIM - 1 {
-                    let torque_dir1 = dp1.gcross(tangents1[j]);
-                    let torque_dir2 = dp2.gcross(-tangents1[j]);
-                    let ii_torque_dir1 = poses1.ii.transform_vector(torque_dir1);
-                    let ii_torque_dir2 = poses2.ii.transform_vector(torque_dir2);
-
-                    let imsum = poses1.im + poses2.im;
-
-                    let r = tangents1[j].dot(&imsum.component_mul(&tangents1[j]))
-                        + ii_torque_dir1.gdot(torque_dir1)
-                        + ii_torque_dir2.gdot(torque_dir2);
-                    let rhs_wo_bias = solver_contact.tangent_velocity.dot(&tangents1[j]);
-
-                    constraint.tangent_part[k].torque_dir1[j] = torque_dir1;
-                    constraint.tangent_part[k].torque_dir2[j] = torque_dir2;
-                    constraint.tangent_part[k].ii_torque_dir1[j] = ii_torque_dir1;
-                    constraint.tangent_part[k].ii_torque_dir2[j] = ii_torque_dir2;
-                    constraint.tangent_part[k].rhs_wo_bias[j] = rhs_wo_bias;
-                    constraint.tangent_part[k].rhs[j] = rhs_wo_bias;
-                    constraint.tangent_part[k].r[j] = if cfg!(feature = "dim2") {
-                        utils::simd_inv(r)
-                    } else {
-                        r
-                    };
-                }
-
-                #[cfg(feature = "dim3")]
-                {
-                    // TODO PERF: we already applied the inverse inertia to the torque
-                    //            dire before. Could we reuse the value instead of retransforming?
-                    constraint.tangent_part[k].r[2] = SimdReal::splat(2.0)
-                        * (constraint.tangent_part[k].ii_torque_dir1[0]
-                            .gdot(constraint.tangent_part[k].torque_dir1[1])
-                            + constraint.tangent_part[k].ii_torque_dir2[0]
-                                .gdot(constraint.tangent_part[k].torque_dir2[1]));
-                }
-
-                // Builder.
-                builder.infos[k].local_p1 =
-                    poses1.pose.inverse_transform_point(&solver_contact.point);
-                builder.infos[k].local_p2 =
-                    poses2.pose.inverse_transform_point(&solver_contact.point);
-                builder.infos[k].tangent_vel = solver_contact.tangent_velocity;
-                builder.infos[k].dist = solver_contact.dist;
-                builder.infos[k].normal_vel = normal_rhs_wo_bias;
-            }
-
-            if BLOCK_SOLVER_ENABLED {
-                // Coupling between consecutive pairs.
-                for k in 0..num_points / 2 {
-                    let k0 = k * 2;
-                    let k1 = k * 2 + 1;
-
-                    let imsum = poses1.im + poses2.im;
-                    let r0 = constraint.normal_part[k0].r;
-                    let r1 = constraint.normal_part[k1].r;
-
-                    let mut r_mat = SdpMatrix2::zero();
-
-                    // TODO PERF: we already applied the inverse inertia to the torque
-                    //            dire before. Could we reuse the value instead of retransforming?
-                    r_mat.m12 = force_dir1.dot(&imsum.component_mul(&force_dir1))
-                        + constraint.normal_part[k0]
-                            .ii_torque_dir1
-                            .gdot(constraint.normal_part[k1].torque_dir1)
-                        + constraint.normal_part[k0]
-                            .ii_torque_dir2
-                            .gdot(constraint.normal_part[k1].torque_dir2);
-                    r_mat.m11 = utils::simd_inv(r0);
-                    r_mat.m22 = utils::simd_inv(r1);
-
-                    let (inv, det) = {
-                        let _disable_fe_except =
+                let (inv, det) = {
+                    let _disable_fe_except =
                             crate::utils::DisableFloatingPointExceptionsFlags::
                             disable_floating_point_exceptions();
-                        r_mat.inverse_and_get_determinant_unchecked()
-                    };
-                    let is_invertible = det.simd_gt(SimdReal::zero());
+                    r_mat.inverse_and_get_determinant_unchecked()
+                };
+                let is_invertible = det.simd_gt(SimdReal::zero());
 
-                    // If inversion failed, the contacts are redundant.
-                    // Ignore the one with the smallest depth (it is too late to
-                    // have the constraint removed from the constraint set, so just
-                    // set the mass (r) matrix elements to 0.
-                    constraint.normal_part[k0].r_mat_elts = [
-                        inv.m11.select(is_invertible, r0),
-                        inv.m22.select(is_invertible, SimdReal::zero()),
-                    ];
-                    constraint.normal_part[k1].r_mat_elts = [
-                        inv.m12.select(is_invertible, SimdReal::zero()),
-                        r_mat.m12.select(is_invertible, SimdReal::zero()),
-                    ];
-                }
+                // If inversion failed, the contacts are redundant.
+                // Ignore the one with the smallest depth (it is too late to
+                // have the constraint removed from the constraint set, so just
+                // set the mass (r) matrix elements to 0.
+                out_constraint.normal_part[k0].r_mat_elts = [
+                    inv.m11.select(is_invertible, r0),
+                    inv.m22.select(is_invertible, SimdReal::zero()),
+                ];
+                out_constraint.normal_part[k1].r_mat_elts = [
+                    inv.m12.select(is_invertible, SimdReal::zero()),
+                    r_mat.m12.select(is_invertible, SimdReal::zero()),
+                ];
             }
         }
     }
@@ -252,12 +254,12 @@ impl ContactWithCoulombFrictionBuilder {
         solved_dt: Real,
         bodies: &SolverBodies,
         _multibodies: &MultibodyJointSet,
-        constraint: &mut ContactWithCoulombFriction,
+        constraint: &mut ContactWithCoulombFriction<SimdReal>,
     ) {
-        let cfm_factor = SimdReal::splat(params.contact_cfm_factor());
+        let cfm_factor = SimdReal::splat(params.contact_softness.cfm_factor(params.dt));
         let inv_dt = SimdReal::splat(params.inv_dt());
         let allowed_lin_err = SimdReal::splat(params.allowed_linear_error());
-        let erp_inv_dt = SimdReal::splat(params.contact_erp_inv_dt());
+        let erp_inv_dt = SimdReal::splat(params.contact_softness.erp_inv_dt(params.dt));
         let max_corrective_velocity = SimdReal::splat(params.max_corrective_velocity());
         let warmstart_coeff = SimdReal::splat(params.warmstart_coefficient);
 
@@ -272,7 +274,7 @@ impl ContactWithCoulombFrictionBuilder {
         #[cfg(feature = "dim3")]
         let tangents1 = [
             constraint.tangent1,
-            constraint.dir1.cross(&constraint.tangent1),
+            constraint.dir1.gcross(constraint.tangent1),
         ];
 
         let solved_dt = SimdReal::splat(solved_dt);
@@ -283,9 +285,9 @@ impl ContactWithCoulombFrictionBuilder {
             .zip(tangent_parts.iter_mut())
         {
             // NOTE: the tangent velocity is equivalent to an additional movement of the first body’s surface.
-            let p1 = poses1.pose * info.local_p1 + info.tangent_vel * solved_dt;
-            let p2 = poses2.pose * info.local_p2;
-            let dist = info.dist + (p1 - p2).dot(&constraint.dir1);
+            let p1 = poses1.transform_point(info.local_p1) + info.tangent_vel * solved_dt;
+            let p2 = poses2.transform_point(info.local_p2);
+            let dist = info.dist + (p1 - p2).gdot(constraint.dir1);
 
             // Normal part.
             {
@@ -306,7 +308,7 @@ impl ContactWithCoulombFrictionBuilder {
                 tangent_part.impulse *= warmstart_coeff;
 
                 for j in 0..DIM - 1 {
-                    let bias = (p1 - p2).dot(&tangents1[j]) * inv_dt;
+                    let bias = (p1 - p2).gdot(tangents1[j]) * inv_dt;
                     tangent_part.rhs[j] = tangent_part.rhs_wo_bias[j] + bias;
                 }
             }
@@ -318,17 +320,17 @@ impl ContactWithCoulombFrictionBuilder {
 
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
-pub(crate) struct ContactWithCoulombFriction {
-    pub dir1: Vector<SimdReal>, // Non-penetration force direction for the first body.
-    pub im1: Vector<SimdReal>,
-    pub im2: Vector<SimdReal>,
-    pub cfm_factor: SimdReal,
-    pub limit: SimdReal,
+pub(crate) struct ContactWithCoulombFriction<N: ScalarType> {
+    pub dir1: N::Vector, // Non-penetration force direction for the first body.
+    pub im1: N::Vector,
+    pub im2: N::Vector,
+    pub cfm_factor: N,
+    pub limit: N,
 
     #[cfg(feature = "dim3")]
-    pub tangent1: Vector<SimdReal>, // One of the friction force directions.
-    pub normal_part: [ContactConstraintNormalPart<SimdReal>; MAX_MANIFOLD_POINTS],
-    pub tangent_part: [ContactConstraintTangentPart<SimdReal>; MAX_MANIFOLD_POINTS],
+    pub tangent1: N::Vector, // One of the friction force directions.
+    pub normal_part: [ContactConstraintNormalPart<N>; MAX_MANIFOLD_POINTS],
+    pub tangent_part: [ContactConstraintTangentPart<N>; MAX_MANIFOLD_POINTS],
     pub solver_vel1: [u32; SIMD_WIDTH],
     pub solver_vel2: [u32; SIMD_WIDTH],
     pub manifold_id: [ContactManifoldIndex; SIMD_WIDTH],
@@ -336,7 +338,7 @@ pub(crate) struct ContactWithCoulombFriction {
     pub manifold_contact_id: [[u8; SIMD_WIDTH]; MAX_MANIFOLD_POINTS],
 }
 
-impl ContactWithCoulombFriction {
+impl ContactWithCoulombFriction<SimdReal> {
     pub fn warmstart(&mut self, bodies: &mut SolverBodies) {
         let mut solver_vel1 = bodies.gather_vels(self.solver_vel1);
         let mut solver_vel2 = bodies.gather_vels(self.solver_vel2);
@@ -361,7 +363,7 @@ impl ContactWithCoulombFriction {
          * Warmstart friction.
          */
         #[cfg(feature = "dim3")]
-        let tangents1 = [&self.tangent1, &self.dir1.cross(&self.tangent1)];
+        let tangents1 = [&self.tangent1, &self.dir1.gcross(self.tangent1)];
         #[cfg(feature = "dim2")]
         let tangents1 = [&self.dir1.orthonormal_vector()];
 
@@ -444,7 +446,7 @@ impl ContactWithCoulombFriction {
          */
         if solve_friction {
             #[cfg(feature = "dim3")]
-            let tangents1 = [&self.tangent1, &self.dir1.cross(&self.tangent1)];
+            let tangents1 = [&self.tangent1, &self.dir1.gcross(self.tangent1)];
             #[cfg(feature = "dim2")]
             let tangents1 = [&self.dir1.orthonormal_vector()];
 
