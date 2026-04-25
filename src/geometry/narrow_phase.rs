@@ -19,10 +19,10 @@ use crate::pipeline::{
     PhysicsHooks,
 };
 use crate::prelude::{CollisionEventFlags, MultibodyJointSet};
+use alloc::sync::Arc;
 use parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
 use parry::utils::PoseOpt;
 use parry::utils::hashmap::HashMap;
-use std::sync::Arc;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -124,7 +124,7 @@ impl NarrowPhase {
     pub fn contact_pairs_with_unknown_gen(
         &self,
         collider: u32,
-    ) -> impl Iterator<Item=&ContactPair> {
+    ) -> impl Iterator<Item = &ContactPair> {
         self.graph_indices
             .get_unknown_gen(collider)
             .map(|id| id.contact_graph_index)
@@ -141,7 +141,7 @@ impl NarrowPhase {
     pub fn contact_pairs_with(
         &self,
         collider: ColliderHandle,
-    ) -> impl Iterator<Item=&ContactPair> {
+    ) -> impl Iterator<Item = &ContactPair> {
         self.graph_indices
             .get(collider.0)
             .map(|id| id.contact_graph_index)
@@ -157,7 +157,7 @@ impl NarrowPhase {
     pub fn intersection_pairs_with_unknown_gen(
         &self,
         collider: u32,
-    ) -> impl Iterator<Item=(ColliderHandle, ColliderHandle, bool)> + '_ {
+    ) -> impl Iterator<Item = (ColliderHandle, ColliderHandle, bool)> + '_ {
         self.graph_indices
             .get_unknown_gen(collider)
             .map(|id| id.intersection_graph_index)
@@ -178,7 +178,7 @@ impl NarrowPhase {
     pub fn intersection_pairs_with(
         &self,
         collider: ColliderHandle,
-    ) -> impl Iterator<Item=(ColliderHandle, ColliderHandle, bool)> + '_ {
+    ) -> impl Iterator<Item = (ColliderHandle, ColliderHandle, bool)> + '_ {
         self.graph_indices
             .get(collider.0)
             .map(|id| id.intersection_graph_index)
@@ -260,14 +260,14 @@ impl NarrowPhase {
     }
 
     /// All the contact pairs maintained by this narrow-phase.
-    pub fn contact_pairs(&self) -> impl Iterator<Item=&ContactPair> {
+    pub fn contact_pairs(&self) -> impl Iterator<Item = &ContactPair> {
         self.contact_graph.interactions()
     }
 
     /// All the intersection pairs maintained by this narrow-phase.
     pub fn intersection_pairs(
         &self,
-    ) -> impl Iterator<Item=(ColliderHandle, ColliderHandle, bool)> + '_ {
+    ) -> impl Iterator<Item = (ColliderHandle, ColliderHandle, bool)> + '_ {
         self.intersection_graph
             .interactions_with_endpoints()
             .map(|e| (e.0, e.1, e.2.intersecting))
@@ -563,7 +563,7 @@ impl NarrowPhase {
                     if let Some(mut intersection) = intersection {
                         if intersection.intersecting
                             && (co1.flags.active_events | co2.flags.active_events)
-                            .contains(ActiveEvents::COLLISION_EVENTS)
+                                .contains(ActiveEvents::COLLISION_EVENTS)
                         {
                             intersection.emit_stop_event(
                                 bodies,
@@ -1113,34 +1113,33 @@ impl NarrowPhase {
             let co2 = &colliders[pair.collider2];
             let active_hooks = co1.flags.active_hooks | co2.flags.active_hooks;
 
+            // Apply the user-defined contact modification.
             if active_hooks.contains(ActiveHooks::MODIFY_SOLVER_CONTACTS) {
-                for manifold in &mut pair.manifolds {
-                    let mut modifiable_solver_contacts =
-                        std::mem::take(&mut manifold.data.solver_contacts);
-                    let mut modifiable_user_data = manifold.data.user_data;
-                    let mut modifiable_normal = manifold.data.normal;
+                let mut modifiable_solver_contacts =
+                   core::mem::take(&mut manifold.data.solver_contacts);
+                   let mut modifiable_user_data = manifold.data.user_data;
+                   let mut modifiable_normal = manifold.data.normal;
 
-                    let mut context = ContactModificationContext {
-                        bodies,
-                        colliders,
-                        rigid_body1: co1.parent.map(|p| p.handle),
-                        rigid_body2: co2.parent.map(|p| p.handle),
-                        collider1: pair.collider1,
-                        collider2: pair.collider2,
-                        manifold,
-                        solver_contacts: &mut modifiable_solver_contacts,
-                        normal: &mut modifiable_normal,
-                        user_data: &mut modifiable_user_data,
-                    };
+                   let mut context = ContactModificationContext {
+                       bodies,
+                       colliders,
+                       rigid_body1: rb_handle1,
+                       rigid_body2: rb_handle2,
+                       collider1: pair.collider1,
+                       collider2: pair.collider2,
+                       manifold,
+                       solver_contacts: &mut modifiable_solver_contacts,
+                       normal: &mut modifiable_normal,
+                       user_data: &mut modifiable_user_data,
+                   };
 
-                    hooks.modify_solver_contacts(&mut context);
+                   hooks.modify_solver_contacts(&mut context);
 
-                    manifold.data.solver_contacts = modifiable_solver_contacts;
-                    manifold.data.normal = modifiable_normal;
-                    manifold.data.user_data = modifiable_user_data;
-                }
-            }
-        });
+                   manifold.data.solver_contacts = modifiable_solver_contacts;
+                   manifold.data.normal = modifiable_normal;
+                   manifold.data.user_data = modifiable_user_data;
+           }
+       });
 
         #[cfg(feature = "parallel")]
         {
@@ -1238,11 +1237,14 @@ impl NarrowPhase {
 #[cfg(feature = "f32")]
 #[cfg(feature = "dim3")]
 mod test {
+    #[allow(unused_imports)]
+    use crate::alloc_prelude::*;
     use crate::math::Vector;
     use crate::prelude::{
         CCDSolver, ColliderBuilder, DefaultBroadPhase, IntegrationParameters, PhysicsPipeline,
         RigidBodyBuilder,
     };
+    use std::println;
 
     use super::*;
 
