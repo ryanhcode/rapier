@@ -20,6 +20,8 @@ use crate::pipeline::{
 };
 use crate::prelude::{CollisionEventFlags, MultibodyJointSet};
 use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
 use parry::utils::PoseOpt;
 use parry::utils::hashmap::HashMap;
@@ -1113,33 +1115,38 @@ impl NarrowPhase {
             let co2 = &colliders[pair.collider2];
             let active_hooks = co1.flags.active_hooks | co2.flags.active_hooks;
 
+            let rb_handle1 = co1.parent.map(|p| p.handle);
+            let rb_handle2 = co2.parent.map(|p| p.handle);
+
             // Apply the user-defined contact modification.
             if active_hooks.contains(ActiveHooks::MODIFY_SOLVER_CONTACTS) {
-                let mut modifiable_solver_contacts =
-                   core::mem::take(&mut manifold.data.solver_contacts);
-                   let mut modifiable_user_data = manifold.data.user_data;
-                   let mut modifiable_normal = manifold.data.normal;
+                for manifold in &mut pair.manifolds {
+                    let mut modifiable_solver_contacts =
+                        core::mem::take(&mut manifold.data.solver_contacts);
+                    let mut modifiable_user_data = manifold.data.user_data;
+                    let mut modifiable_normal = manifold.data.normal;
 
-                   let mut context = ContactModificationContext {
-                       bodies,
-                       colliders,
-                       rigid_body1: rb_handle1,
-                       rigid_body2: rb_handle2,
-                       collider1: pair.collider1,
-                       collider2: pair.collider2,
-                       manifold,
-                       solver_contacts: &mut modifiable_solver_contacts,
-                       normal: &mut modifiable_normal,
-                       user_data: &mut modifiable_user_data,
-                   };
+                    let mut context = ContactModificationContext {
+                        bodies,
+                        colliders,
+                        rigid_body1: rb_handle1,
+                        rigid_body2: rb_handle2,
+                        collider1: pair.collider1,
+                        collider2: pair.collider2,
+                        manifold,
+                        solver_contacts: &mut modifiable_solver_contacts,
+                        normal: &mut modifiable_normal,
+                        user_data: &mut modifiable_user_data,
+                    };
 
-                   hooks.modify_solver_contacts(&mut context);
+                    hooks.modify_solver_contacts(&mut context);
 
-                   manifold.data.solver_contacts = modifiable_solver_contacts;
-                   manifold.data.normal = modifiable_normal;
-                   manifold.data.user_data = modifiable_user_data;
-           }
-       });
+                    manifold.data.solver_contacts = modifiable_solver_contacts;
+                    manifold.data.normal = modifiable_normal;
+                    manifold.data.user_data = modifiable_user_data;
+                }
+            }
+        });
 
         #[cfg(feature = "parallel")]
         {
