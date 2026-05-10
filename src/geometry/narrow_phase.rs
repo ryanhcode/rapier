@@ -1160,6 +1160,7 @@ impl NarrowPhase {
                     }
                 }
 
+                #[cfg(not(feature = "parallel"))]
                 islands.interaction_started_or_stopped(
                     bodies,
                     rb_handle1,
@@ -1167,6 +1168,11 @@ impl NarrowPhase {
                     has_any_active_contact,
                     true,
                 );
+                #[cfg(feature = "parallel")]
+                {
+                    // When running in parallel mode, defer the islands call after the loop.
+                    let _ = snd.send((rb_handle1, rb_handle2, has_any_active_contact));
+                }
             }
         });
 
