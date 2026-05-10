@@ -1117,6 +1117,7 @@ impl NarrowPhase {
 
             let rb_handle1 = co1.parent.map(|p| p.handle);
             let rb_handle2 = co2.parent.map(|p| p.handle);
+            let had_any_active_contact = pair.has_any_active_contact();
 
             // Apply the user-defined contact modification.
             if active_hooks.contains(ActiveHooks::MODIFY_SOLVER_CONTACTS) {
@@ -1145,6 +1146,27 @@ impl NarrowPhase {
                     manifold.data.normal = modifiable_normal;
                     manifold.data.user_data = modifiable_user_data;
                 }
+            }
+
+            let has_any_active_contact = pair.has_any_active_contact();
+            if has_any_active_contact != had_any_active_contact {
+                let active_events = co1.flags.active_events | co2.flags.active_events;
+
+                if active_events.contains(ActiveEvents::COLLISION_EVENTS) {
+                    if has_any_active_contact {
+                        pair.emit_start_event(bodies, colliders, events);
+                    } else {
+                        pair.emit_stop_event(bodies, colliders, events);
+                    }
+                }
+
+                islands.interaction_started_or_stopped(
+                    bodies,
+                    rb_handle1,
+                    rb_handle2,
+                    has_any_active_contact,
+                    true,
+                );
             }
         });
 
